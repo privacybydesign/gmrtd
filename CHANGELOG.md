@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.1](https://github.com/privacybydesign/gmrtd/compare/v1.0.0...v1.0.1) (2026-08-07)
+
+
+### Bug Fixes
+
+* **activeauth:** try all ICAO-permitted hashes for ECDSA AA ([2a69bd8](https://github.com/privacybydesign/gmrtd/commit/2a69bd85e976fa48e7c2327f2d83886884ba91a2))
+* **activeauth:** try all ICAO-permitted hashes for ECDSA AA ([c1503de](https://github.com/privacybydesign/gmrtd/commit/c1503de2ffbc19b5b3cf8d92b3cd727ed7fc1666))
+
 ## [1.0.0](https://github.com/gmrtd/gmrtd/compare/v0.48.1...v1.0.0) (2026-07-30)
 
 
