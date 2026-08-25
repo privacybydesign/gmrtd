@@ -198,7 +198,7 @@ For convenience and interoperability testing, gmrtd includes built-in CSCA trust
 Together these cover **121 countries**. These defaults can be replaced, extended, or disabled depending on your trust model.
 
 # 📌 Compatibility
-- Go: 1.19+
+- Go: 1.26+
 - Transports: PC/SC, Core NFC, Android NFC, custom APDU transceivers
 - Platforms: Desktop, mobile, embedded
 
@@ -218,6 +218,15 @@ Use `gmrtd-android-16kb.aar` for apps that need Android 16 KB page-size compatib
 This library is intended for **legitimate, consent-based MRTD reading**.
 
 Handle personal data in accordance with applicable laws and regulations.
+
+# 📱 Apps Using gmrtd
+Projects using gmrtd to read and verify MRTDs in production:
+
+| App | iOS | Android |
+|---|---|---|
+| **[Inspekt.ID](https://apps.apple.com/us/app/inspekt-id/id6794529798)** | <a href="https://apps.apple.com/us/app/inspekt-id/id6794529798"><img src="https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/c5/0b/24/c50b2463-5306-b7b1-c3fe-af1bf9ce11bb/AppIcon-1x_U007ephone-0-1-85-220-0.png/540x540bb.jpg" alt="Inspekt.ID" width="100" height="100" /></a> | — |
+
+Using gmrtd in your app? Open a PR to add it here.
 
 # 🤝 Contributing
 Issues and pull requests are welcome.

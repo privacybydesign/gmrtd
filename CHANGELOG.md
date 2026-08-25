@@ -1,12 +1,45 @@
 # Changelog
 
-## [1.0.1](https://github.com/privacybydesign/gmrtd/compare/v1.0.0...v1.0.1) (2026-08-07)
+## [1.1.4](https://github.com/gmrtd/gmrtd/compare/v1.1.3...v1.1.4) (2026-08-25)
 
 
 ### Bug Fixes
 
-* **activeauth:** try all ICAO-permitted hashes for ECDSA AA ([2a69bd8](https://github.com/privacybydesign/gmrtd/commit/2a69bd85e976fa48e7c2327f2d83886884ba91a2))
-* **activeauth:** try all ICAO-permitted hashes for ECDSA AA ([c1503de](https://github.com/privacybydesign/gmrtd/commit/c1503de2ffbc19b5b3cf8d92b3cd727ed7fc1666))
+* **activeauth:** try all ICAO-permitted hashes for ECDSA AA ([#477](https://github.com/gmrtd/gmrtd/issues/477)) ([2068821](https://github.com/gmrtd/gmrtd/commit/206882148217822f88044bec1d9f0baf38e4492f))
+
+## [1.1.3](https://github.com/gmrtd/gmrtd/compare/v1.1.2...v1.1.3) (2026-08-24)
+
+
+### Bug Fixes
+
+* **reader:** fail closed on PACE error unless BAC fallback opted in ([#446](https://github.com/gmrtd/gmrtd/issues/446)) ([1701e74](https://github.com/gmrtd/gmrtd/commit/1701e74a746a260a5e1707f0c5ef34e100feb32b))
+
+## [1.1.2](https://github.com/gmrtd/gmrtd/compare/v1.1.1...v1.1.2) (2026-08-21)
+
+
+### Bug Fixes
+
+* sonar warning for debug.PrintStack() ([#474](https://github.com/gmrtd/gmrtd/issues/474)) ([6331c71](https://github.com/gmrtd/gmrtd/commit/6331c71fb02ea978efa44a7001048b6a30451da0))
+
+## [1.1.1](https://github.com/gmrtd/gmrtd/compare/v1.1.0...v1.1.1) (2026-08-11)
+
+
+### Bug Fixes
+
+* go version bump to address ios crash ([#465](https://github.com/gmrtd/gmrtd/issues/465)) ([690f365](https://github.com/gmrtd/gmrtd/commit/690f365ad30c352dfe004a8261d840e70141d55a))
+
+## [1.1.0](https://github.com/gmrtd/gmrtd/compare/v1.0.0...v1.1.0) (2026-08-10)
+
+
+### Features
+
+* add computed Age/PossibleAges to IdentityAttributes and HTML report (fixes [#462](https://github.com/gmrtd/gmrtd/issues/462)) ([#463](https://github.com/gmrtd/gmrtd/issues/463)) ([d0c37b2](https://github.com/gmrtd/gmrtd/commit/d0c37b275475ef6b950deabca636d3f288b873dc))
+
+
+### Bug Fixes
+
+* extended length fallback issue with Chinese passport (fixes [#457](https://github.com/gmrtd/gmrtd/issues/457)) ([#458](https://github.com/gmrtd/gmrtd/issues/458)) ([d645bb1](https://github.com/gmrtd/gmrtd/commit/d645bb17dbbe7a633ac57022d3cb7445518ca08b))
+* Improve SelectMF robustness across passport vendors (fixes [#460](https://github.com/gmrtd/gmrtd/issues/460)) ([#461](https://github.com/gmrtd/gmrtd/issues/461)) ([2be14ef](https://github.com/gmrtd/gmrtd/commit/2be14efc0ddfc86fb26eb50eda06e6baebd049a5))
 
 ## [1.0.0](https://github.com/gmrtd/gmrtd/compare/v0.48.1...v1.0.0) (2026-07-30)
 

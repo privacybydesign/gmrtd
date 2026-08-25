@@ -72,21 +72,22 @@ var dgToFileId = map[int]uint16{
 
 // Reader is not safe for concurrent use: it is a single-use, single-goroutine
 // object for driving one document read. The mu mutex guards the mutable
-// configuration fields below (set via SkipPace/SkipImages/WithAAChallenge)
-// and serialises ReadDocument, so a Reader that is accidentally shared and
-// called from multiple goroutines fails safe (calls queue up) rather than
-// corrupting the Go heap - see mobile.Reader for the same concern one layer
-// up, which is where callers are most likely to accidentally share an
-// instance across threads.
+// configuration fields below (set via SkipPace/SkipImages/
+// AllowBacFallbackOnPaceError/WithAAChallenge) and serialises ReadDocument, so
+// a Reader that is accidentally shared and called from multiple goroutines
+// fails safe (calls queue up) rather than corrupting the Go heap - see
+// mobile.Reader for the same concern one layer up, which is where callers are
+// most likely to accidentally share an instance across threads.
 type Reader struct {
 	mu sync.Mutex
 
-	status       ReaderStatus
-	nfc          *iso7816.NfcSession
-	cscaCertPool cms.CertPool
-	skipPace     bool // skip PACE
-	skipImages   bool // skip image DGs (DG2, DG7)
-	aaChallenge  []byte
+	status                      ReaderStatus
+	nfc                         *iso7816.NfcSession
+	cscaCertPool                cms.CertPool
+	skipPace                    bool // skip PACE
+	skipImages                  bool // skip image DGs (DG2, DG7)
+	allowBacFallbackOnPaceError bool // permit BAC after a recorded PACE error
+	aaChallenge                 []byte
 }
 
 func NewReader(status ReaderStatus, nfc *iso7816.NfcSession, cscaCertPool cms.CertPool) *Reader {
@@ -107,6 +108,15 @@ func (reader *Reader) SkipImages() {
 	reader.mu.Lock()
 	defer reader.mu.Unlock()
 	reader.skipImages = true
+}
+
+// AllowBacFallbackOnPaceError configures the reader to continue to BAC when
+// PACE is attempted and fails. The default is fail-closed: a PACE error stops
+// ReadDocument before BAC. Session.PaceErr is still recorded either way.
+func (reader *Reader) AllowBacFallbackOnPaceError() {
+	reader.mu.Lock()
+	defer reader.mu.Unlock()
+	reader.allowBacFallbackOnPaceError = true
 }
 
 // WithAAChallenge sets a caller-supplied 8-byte RND.IFD challenge for Active
@@ -238,7 +248,13 @@ func selectMF(reader *Reader, _ *ReaderState) (err error) {
 	reader.reportPhase(STATUS_PHASE_CONNECTING)
 	slog.Info("Selecting MF")
 	if err = reader.nfc.SelectMF(); err != nil {
-		return fmt.Errorf("[selectMF] nfc.SelectMF error: %w", err)
+		// NB SelectMF is not essential to the read (see spec note above), and we've seen a
+		// growing list of vendor/passport-specific error statuses here over time (e.g. NZ, CN,
+		// AU, Ukraine) that each had to be tolerated individually to keep the read working.
+		// Rather than extending that allow-list per-passport indefinitely, tolerate any error
+		// here and continue - if the chip is genuinely unreachable, a later step will fail with
+		// a clearer error anyway.
+		slog.Warn("selectMF", "Tolerating error", err)
 	}
 	return nil
 }
@@ -366,9 +382,16 @@ func performPace(reader *Reader, state *ReaderState) error {
 		return nil
 	}
 	reader.reportPhase(STATUS_PHASE_ACCESS_CONTROL_PACE)
-	// NB errors are just recorded at this point
 	state.docEx.Session.PaceResult, state.docEx.Session.PaceCamResult, state.docEx.Session.PaceErr = pace.NewPace(reader.nfc, &state.docEx.Document, state.password).DoPACE()
-	return nil
+	if state.docEx.Session.PaceErr == nil {
+		return nil
+	}
+	// Default: fail closed so PACE-fail does not silently fall through to BAC.
+	// Opt in via AllowBacFallbackOnPaceError for interoperability cases.
+	if reader.allowBacFallbackOnPaceError {
+		return nil
+	}
+	return fmt.Errorf("[performPace] PACE failed: %w", state.docEx.Session.PaceErr)
 }
 
 func performBac(reader *Reader, state *ReaderState) error {

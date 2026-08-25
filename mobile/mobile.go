@@ -3,9 +3,7 @@ package mobile
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"runtime/debug"
 	"sync"
 
 	"github.com/gmrtd/gmrtd/cms"
@@ -60,7 +58,7 @@ type Transceiver interface {
 // LDS1 data-group number (1..16), which is only set for
 // STATUS_PHASE_READING_DATA_GROUP and 0 for every other phase.
 type ReaderStatus interface {
-	Status(phase int, dataGroup int)
+	Status(phase, dataGroup int)
 }
 
 // Phases of a document read, as passed to ReaderStatus.Status.
@@ -141,21 +139,23 @@ func NewPasswordCan(can string) (*MrtdPassword, error) {
 
 // Reader is not safe for concurrent use: it is a single-use, single-goroutine
 // object for driving one document read. mu guards the mutable configuration
-// fields (set via SetApduMaxLe/SkipPace/SkipImages/WithAAChallenge) and
-// serialises ReadDocument, so a Reader that a host app accidentally shares
-// and calls from multiple threads (e.g. gomobile bindings invoked from
-// several Swift/Kotlin dispatch queues) fails safe - calls queue up - rather
-// than racing on these fields and corrupting the Go heap. Callers should
-// still construct a new Reader per read rather than relying on this lock.
+// fields (set via SetApduMaxLe/SkipPace/SkipImages/
+// AllowBacFallbackOnPaceError/WithAAChallenge) and serialises ReadDocument, so
+// a Reader that a host app accidentally shares and calls from multiple
+// threads (e.g. gomobile bindings invoked from several Swift/Kotlin dispatch
+// queues) fails safe - calls queue up - rather than racing on these fields
+// and corrupting the Go heap. Callers should still construct a new Reader per
+// read rather than relying on this lock.
 type Reader struct {
 	mu sync.Mutex
 
-	status      ReaderStatus
-	transceiver Transceiver
-	maxRead     int
-	skipPace    bool
-	skipImages  bool
-	aaChallenge []byte
+	status                      ReaderStatus
+	transceiver                 Transceiver
+	maxRead                     int
+	skipPace                    bool
+	skipImages                  bool
+	allowBacFallbackOnPaceError bool
+	aaChallenge                 []byte
 }
 
 type Document struct {
@@ -195,6 +195,14 @@ func (r *Reader) SkipImages() {
 	r.skipImages = true
 }
 
+// AllowBacFallbackOnPaceError configures the reader to continue to BAC when
+// PACE is attempted and fails. The default is fail-closed.
+func (r *Reader) AllowBacFallbackOnPaceError() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.allowBacFallbackOnPaceError = true
+}
+
 // WithAAChallenge sets a caller-supplied 8-byte RND.IFD challenge for Active
 // Authentication. If not called, a random challenge is generated internally.
 //
@@ -223,23 +231,25 @@ func (r *Reader) ReadDocument(password *MrtdPassword, atr []byte, ats []byte) (d
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	// Recover at the public API boundary so an unexpected panic does not
+	// propagate through callers such as gomobile. Do not log here; leave
+	// logging decisions to the application.
 	defer func() {
-		if e := recover(); e != nil {
-			switch x := e.(type) {
-			case string:
-				err = errors.New(x)
+		if recovered := recover(); recovered != nil {
+			doc = nil
+
+			switch v := recovered.(type) {
 			case error:
-				err = x
+				err = fmt.Errorf("[ReadDocument] panic: %w", v)
 			default:
-				err = errors.New("unknown panic")
+				err = fmt.Errorf("[ReadDocument] panic: %v", v)
 			}
-			debug.PrintStack()
 		}
 	}()
 
 	doc = &Document{}
 
-	var nfc *iso7816.NfcSession = iso7816.NewNfcSession(r.transceiver)
+	nfc := iso7816.NewNfcSession(r.transceiver)
 
 	if r.maxRead > 0 {
 		nfc.SetMaxLe(r.maxRead)
@@ -250,8 +260,11 @@ func (r *Reader) ReadDocument(password *MrtdPassword, atr []byte, ats []byte) (d
 		return nil, fmt.Errorf("[ReadDocument] getCscaCertPool error: %w", err)
 	}
 
-	var gmrtdReader *reader.Reader
-	gmrtdReader = reader.NewReader(&readerStatusAdapter{status: r.status}, nfc, certPool)
+	gmrtdReader := reader.NewReader(
+		&readerStatusAdapter{status: r.status},
+		nfc,
+		certPool,
+	)
 
 	if r.skipPace {
 		gmrtdReader.SkipPace()
@@ -261,15 +274,27 @@ func (r *Reader) ReadDocument(password *MrtdPassword, atr []byte, ats []byte) (d
 		gmrtdReader.SkipImages()
 	}
 
+	if r.allowBacFallbackOnPaceError {
+		gmrtdReader.AllowBacFallbackOnPaceError()
+	}
+
 	if r.aaChallenge != nil {
-		if gmrtdReader, err = gmrtdReader.WithAAChallenge(r.aaChallenge); err != nil {
+		gmrtdReader, err = gmrtdReader.WithAAChallenge(r.aaChallenge)
+		if err != nil {
 			return nil, fmt.Errorf("[ReadDocument] WithAAChallenge error: %w", err)
 		}
 	}
 
-	doc.documentEx, doc.apduLog, err = gmrtdReader.ReadDocument(password.password, atr, ats)
+	doc.documentEx, doc.apduLog, err = gmrtdReader.ReadDocument(
+		password.password,
+		atr,
+		ats,
+	)
+	if err != nil {
+		return doc, err
+	}
 
-	return doc, err
+	return doc, nil
 }
 
 // CountryName returns the country name for an MRZ alpha-3 country code.

@@ -159,6 +159,20 @@ func TestSkipImages(t *testing.T) {
 	}
 }
 
+func TestAllowBacFallbackOnPaceError(t *testing.T) {
+	reader := &Reader{}
+
+	if reader.allowBacFallbackOnPaceError {
+		t.Fatalf("allowBacFallbackOnPaceError should default to false")
+	}
+
+	reader.AllowBacFallbackOnPaceError()
+
+	if !reader.allowBacFallbackOnPaceError {
+		t.Fatalf("allowBacFallbackOnPaceError should be true after calling AllowBacFallbackOnPaceError()")
+	}
+}
+
 func TestWithAAChallenge(t *testing.T) {
 	t.Run("valid 8 bytes", func(t *testing.T) {
 		r, err := (&Reader{}).WithAAChallenge(make([]byte, 8))
@@ -197,7 +211,7 @@ type testReaderStatus struct {
 	statuses [][2]int
 }
 
-func (status *testReaderStatus) Status(phase int, dataGroup int) {
+func (status *testReaderStatus) Status(phase, dataGroup int) {
 	status.mu.Lock()
 	defer status.mu.Unlock()
 	status.statuses = append(status.statuses, [2]int{phase, dataGroup})
@@ -276,8 +290,9 @@ func TestReaderStatusAdapter(t *testing.T) {
 	}
 }
 
-// NB basic test that will fail quickly due to static transceiver, so only the
-// first phase of the read is reported
+// NB basic test that will fail quickly due to static transceiver. SelectMF tolerates its
+// own (empty-response) error, so the read proceeds one phase further before failing on the
+// next real exchange (reading EF.CardAccess).
 func TestReadDocumentReportsStatus(t *testing.T) {
 	status := &testReaderStatus{}
 
@@ -292,7 +307,7 @@ func TestReadDocumentReportsStatus(t *testing.T) {
 		t.Fatalf("expected error")
 	}
 
-	exp := [][2]int{{STATUS_PHASE_CONNECTING, 0}}
+	exp := [][2]int{{STATUS_PHASE_CONNECTING, 0}, {STATUS_PHASE_READING_CARD_ACCESS, 0}}
 	if act := status.Recorded(); !reflect.DeepEqual(act, exp) {
 		t.Errorf("recorded statuses differ to expected (act:%v) (exp:%v)", act, exp)
 	}
@@ -586,6 +601,7 @@ func TestReaderConcurrentAccess(t *testing.T) {
 			_ = reader.SetApduMaxLe(1000)
 			reader.SkipPace()
 			reader.SkipImages()
+			reader.AllowBacFallbackOnPaceError()
 			_, _ = reader.WithAAChallenge(make([]byte, 8))
 			_, _ = reader.ReadDocument(pass, nil, nil) // expected to fail fast (static transceiver)
 		}()
