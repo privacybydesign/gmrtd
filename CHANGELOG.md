@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.3.2](https://github.com/gmrtd/gmrtd/compare/v1.3.1...v1.3.2) (2026-09-29)
+
+
+### Bug Fixes
+
+* **iso3166:** don't resolve an empty alpha-3 code to the European Union (fixes [#514](https://github.com/gmrtd/gmrtd/issues/514)) ([99da5a6](https://github.com/gmrtd/gmrtd/commit/99da5a6d8fa9cf88b222bffa9dfd4436879f7caa))
+* **iso3166:** don't resolve an empty alpha-3 code to the European Union (fixes [#514](https://github.com/gmrtd/gmrtd/issues/514)) ([#515](https://github.com/gmrtd/gmrtd/issues/515)) ([9396b7a](https://github.com/gmrtd/gmrtd/commit/9396b7a50ccd811322c38f4928c5d941a6ffa13b))
+
+## [1.3.1](https://github.com/gmrtd/gmrtd/compare/v1.3.0...v1.3.1) (2026-09-29)
+
+
+### Bug Fixes
+
+* **iso3166:** add 39 missing ISO 3166-1 countries ([380cfd1](https://github.com/gmrtd/gmrtd/commit/380cfd16127cc715fec39c65826a6e2338f56545))
+* **iso3166:** add 39 missing ISO 3166-1 countries ([#511](https://github.com/gmrtd/gmrtd/issues/511)) ([39f9009](https://github.com/gmrtd/gmrtd/commit/39f9009f5a18362b1de0686ec69cad27876a5113))
+
+## [1.3.0](https://github.com/gmrtd/gmrtd/compare/v1.2.0...v1.3.0) (2026-09-28)
+
+
+### Features
+
+* **csca:** update to latest DE CSCA master-list, dated 19/08/2026 (fixes [#502](https://github.com/gmrtd/gmrtd/issues/502)) ([e4ffd5d](https://github.com/gmrtd/gmrtd/commit/e4ffd5d32ec6ea848e8209f8c357e3ed13872fbd))
+* **csca:** update to latest DE CSCA master-list, dated 19/08/2026 (fixes [#502](https://github.com/gmrtd/gmrtd/issues/502)) ([#503](https://github.com/gmrtd/gmrtd/issues/503)) ([74e2c1f](https://github.com/gmrtd/gmrtd/commit/74e2c1fb97d3f9016dc436c67b967d3110a28287))
+* **document:** add expired indicator to identity attributes ([842133d](https://github.com/gmrtd/gmrtd/commit/842133d2c82ae6914f9b1c3ee484a83124920926))
+* **document:** add expired indicator to identity attributes ([#508](https://github.com/gmrtd/gmrtd/issues/508)) ([21952ba](https://github.com/gmrtd/gmrtd/commit/21952bab907cda3545301a70da77ac187fde8481))
+
 ## [1.2.0](https://github.com/gmrtd/gmrtd/compare/v1.1.5...v1.2.0) (2026-09-18)
 
 
