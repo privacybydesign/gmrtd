@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.7.1](https://github.com/privacybydesign/gmrtd/compare/v1.7.0...v1.7.1) (2026-10-26)
+
+
+### Bug Fixes
+
+* bump go directive to 1.26.10 to pick up standard-library security fixes (fixes [#554](https://github.com/privacybydesign/gmrtd/issues/554)) ([#555](https://github.com/privacybydesign/gmrtd/issues/555)) ([59b3f1e](https://github.com/privacybydesign/gmrtd/commit/59b3f1eeee1fcc44768cdaa040e3867df2ec2e60))
+* findings of the shared CI checks ([777c410](https://github.com/privacybydesign/gmrtd/commit/777c4105586981b6b8c377cfeb3d11a4ae201c91))
+
 ## [1.7.0](https://github.com/gmrtd/gmrtd/compare/v1.6.0...v1.7.0) (2026-10-25)
 
 
