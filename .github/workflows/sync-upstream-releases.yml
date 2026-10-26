@@ -7,7 +7,7 @@ name: Sync upstream releases
 
 on:
   schedule:
-    - cron: "0 */6 * * *" # every 6 hours
+    - cron: "0 6 * * *" # daily at 06:00 UTC
   workflow_dispatch: {}
 
 permissions:
@@ -29,6 +29,9 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          # PAT with Contents + Workflows write: GITHUB_TOKEN can never push
+          # upstream commits that touch .github/workflows/.
+          token: ${{ secrets.SYNC_TOKEN }}
 
       - name: Sync tags from upstream
         run: |
