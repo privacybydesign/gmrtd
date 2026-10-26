@@ -83,6 +83,8 @@ jobs:
           - pkg: ./cms
             name: FuzzParseCertificates
           - pkg: ./cms
+            name: FuzzCertificateInfo
+          - pkg: ./cms
             name: FuzzParseRDNSequence
           - pkg: ./cms
             name: FuzzAsn1decodeSubjectPublicKeyInfo
@@ -131,9 +133,9 @@ jobs:
           - pkg: ./document
             name: FuzzNewChipAuthEvidenceFromCbor
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
 
@@ -146,16 +148,37 @@ jobs:
         id: fuzzcache
         run: echo "dir=$(go env GOCACHE)/fuzz" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/cache/restore@v6
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.fuzzcache.outputs.dir }}
           key: fuzz-${{ matrix.target.pkg }}-${{ matrix.target.name }}-${{ github.run_id }}
           restore-keys: fuzz-${{ matrix.target.pkg }}-${{ matrix.target.name }}-
 
+      # Go's fuzz coordinator intermittently reports "context deadline exceeded"
+      # as a test failure when -fuzztime expires and it tears down its workers,
+      # with no crash and no failing input written (seen across unrelated
+      # targets: bac, iso7816, document, cryptoutils). Only that exact shape is
+      # downgraded to a warning; any run that writes a new testdata/fuzz entry,
+      # or fails any other way, still fails the job.
       - name: go test -fuzz=${{ matrix.target.name }}
-        run: go test ${{ matrix.target.pkg }} -run='^$' -fuzz='^${{ matrix.target.name }}$' -fuzztime=5m
+        env:
+          PKG: ${{ matrix.target.pkg }}
+          TARGET: ${{ matrix.target.name }}
+        run: |
+          set -o pipefail
+          corpus="$PKG/testdata/fuzz/$TARGET"
+          log="$RUNNER_TEMP/fuzz.log"
+          before=$(ls "$corpus" 2>/dev/null || true)
+          status=0
+          go test "$PKG" -run='^$' -fuzz="^$TARGET\$" -fuzztime=5m 2>&1 | tee "$log" || status=$?
+          after=$(ls "$corpus" 2>/dev/null || true)
+          if [ "$status" -ne 0 ] && [ "$before" = "$after" ] && grep -qx '    context deadline exceeded' "$log"; then
+            echo "::warning::$TARGET: fuzzer shutdown reported 'context deadline exceeded' with no failing input; treating as a pass"
+            exit 0
+          fi
+          exit "$status"
 
-      - uses: actions/cache/save@v6
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: always()
         with:
           path: ${{ steps.fuzzcache.outputs.dir }}
@@ -163,7 +186,7 @@ jobs:
 
       - name: Upload failing input
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fuzz-failure-${{ matrix.target.name }}
           path: '**/testdata/fuzz/${{ matrix.target.name }}/'

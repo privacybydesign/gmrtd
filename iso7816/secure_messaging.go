@@ -109,8 +109,9 @@ func (sm *SecureMessaging) SetSSC(ssc []byte) error {
 	return nil
 }
 
+// String omits the session keys: SM state is logged at debug level, and logs may be shared.
 func (sm SecureMessaging) String() string {
-	return fmt.Sprintf("(alg:%d, ksenc:%x, ksmac:%x, ssc:%x)", sm.alg, sm.ksEnc, sm.ksMac, sm.ssc)
+	return fmt.Sprintf("(alg:%d, ssc:%x)", sm.alg, sm.ssc)
 }
 
 // increments the SSC
@@ -437,7 +438,8 @@ func (sm *SecureMessaging) Decode(rApduBytes []byte) (rApdu *RApdu, err error) {
 
 	rApdu = NewRApdu(rApduStatus, rapduData)
 
-	slog.Debug("sm.Decode", "In", utils.BytesToHex(rApduBytes), "Out", rApdu.String())
+	// Not the decrypted data: it holds chip file contents, i.e. the holder's personal data.
+	slog.Debug("sm.Decode", "In", utils.BytesToHex(rApduBytes), "Status", fmt.Sprintf("%04x", rApdu.Status), "DataLen", len(rApdu.Data))
 
 	return rApdu, err
 }

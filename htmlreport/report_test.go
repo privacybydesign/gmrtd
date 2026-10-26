@@ -344,3 +344,101 @@ func TestTemplateFuncMapIndentedJson(t *testing.T) {
 		t.Errorf("IndentedJson: unexpected output %q", got)
 	}
 }
+
+func TestGenerateOfflineEvidenceSource(t *testing.T) {
+	testCases := []struct {
+		name    string
+		offline *document.OfflineVerification
+		want    []string
+		notWant []string
+	}{
+		{name: "live read", offline: nil, notWant: []string{"Evidence Source"}},
+		{name: "trusted reader", offline: &document.OfflineVerification{TrustedSource: true}, want: []string{"Offline: trusted reader"}},
+		{name: "untrusted, no challenge", offline: &document.OfflineVerification{}, want: []string{"Offline: untrusted reader", "(no challenge bound)"}},
+		{name: "untrusted, challenge bound", offline: &document.OfflineVerification{AAChallengeBound: true}, want: []string{"Offline: untrusted reader"}, notWant: []string{"(no challenge bound)"}},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			docEx := &document.DocumentEx{}
+			docEx.Session.Offline = tc.offline
+
+			buf, err := Generate(docEx, nil)
+			if err != nil {
+				t.Fatalf("unexpected error: %s", err)
+			}
+
+			out := buf.String()
+			for _, w := range tc.want {
+				if !strings.Contains(out, w) {
+					t.Errorf("expected output to contain %q", w)
+				}
+			}
+			for _, w := range tc.notWant {
+				if strings.Contains(out, w) {
+					t.Errorf("expected output not to contain %q", w)
+				}
+			}
+		})
+	}
+}
+
+func passiveAuthSection(t *testing.T, docEx *document.DocumentEx) string {
+	t.Helper()
+	buf, err := Generate(docEx, nil)
+	if err != nil {
+		t.Fatalf("Generate error: %s", err)
+	}
+	html := buf.String()
+	start := strings.Index(html, "<h2>Passive Authentication</h2>")
+	end := strings.Index(html, "<h2>Identity Attributes</h2>")
+	if start < 0 || end < start {
+		t.Fatalf("Passive Authentication section not found")
+	}
+	return html[start:end]
+}
+
+func TestGeneratePassiveAuthTrustChainUnverified(t *testing.T) {
+	section := passiveAuthSection(t, sampleDocEx(t, false))
+
+	for _, want := range []string{
+		"Status: <b>FAILED</b>",
+		"Not verified.",
+		"DOCUMENT_SIGNER",
+		"CN=DS-AUSTRIA-eMRTD",
+	} {
+		if !strings.Contains(section, want) {
+			t.Errorf("section missing %q", want)
+		}
+	}
+	if strings.Contains(section, "<h3>CardSecurity</h3>") {
+		t.Errorf("CardSecurity heading shown for a document without CardSecurity")
+	}
+}
+
+func TestGeneratePassiveAuthTrustChainVerified(t *testing.T) {
+	docEx := sampleDocEx(t, true)
+	signers, err := docEx.Document.Mf.Lds1.Sod.SD.SignerCertificates()
+	if err != nil || len(signers) != 1 {
+		t.Fatalf("SignerCertificates: signers=%d err=%v", len(signers), err)
+	}
+	docEx.Session.PassiveAuthResult.Sod = &document.PassiveAuth{CertChain: [][]byte{signers[0].Raw}}
+
+	section := passiveAuthSection(t, docEx)
+
+	for _, want := range []string{"Status: <b>VERIFIED</b>", "DOCUMENT_SIGNER", "EC(BrainpoolP256r1)", "2023-01-31 .. 2033-05-06"} {
+		if !strings.Contains(section, want) {
+			t.Errorf("section missing %q", want)
+		}
+	}
+	if strings.Contains(section, "Not verified.") {
+		t.Errorf("verified chain shown as not verified")
+	}
+}
+
+func TestTemplateFuncMapIsTrue(t *testing.T) {
+	fn := templateFuncMap()["IsTrue"].(func(*bool) bool)
+	yes, no := true, false
+	if !fn(&yes) || fn(&no) || fn(nil) {
+		t.Error("IsTrue: expected true only for a non-nil true")
+	}
+}

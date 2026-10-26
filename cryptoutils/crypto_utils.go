@@ -85,8 +85,9 @@ type RsaPublicKey struct {
 	E int
 }
 
+// String omits the private key: keypairs end up in debug logs, which may be shared.
 func (ecKeypair EcKeypair) String() string {
-	return fmt.Sprintf("(Pri:%x, Pub:%s)", ecKeypair.Pri, ecKeypair.Pub.String())
+	return fmt.Sprintf("(Pub:%s)", ecKeypair.Pub.String())
 }
 
 func (ec EcPoint) String() string {
@@ -304,10 +305,19 @@ func DecodeX962EcPoint(ec elliptic.Curve, data []byte) (*EcPoint, error) {
 	return NewEcPoint(x.Bytes(), y.Bytes()), nil
 }
 
+// EcDhSharedSecret returns the ECDH shared secret: the x-coordinate of the shared point as a
+// field-size octet string (FE2OS, BSI TR-03111 / ICAO 9303-11 §9.6). big.Int.Bytes drops
+// leading zero bytes, which would give a short secret, and so wrong session keys, whenever
+// the x-coordinate starts with a zero byte (about 1 in 256 key agreements).
+func EcDhSharedSecret(localPrivate []byte, remotePublic *EcPoint, ec elliptic.Curve) []byte {
+	shared := DoEcDh(localPrivate, remotePublic, ec)
+	return shared.X.FillBytes(make([]byte, (ec.Params().BitSize+7)/8))
+}
+
 func DoEcDh(localPrivate []byte, remotePublic *EcPoint, ec elliptic.Curve) *EcPoint {
 	var point EcPoint
 	point.X, point.Y = ec.ScalarMult(remotePublic.X, remotePublic.Y, localPrivate)
-	slog.Debug("DoECDH", "Pri", utils.BytesToHex(localPrivate), "Pub", remotePublic, "EC.P", utils.BytesToHex(ec.Params().P.Bytes()), "Res", point)
+	slog.Debug("DoECDH", "Pub", remotePublic, "EC.P", utils.BytesToHex(ec.Params().P.Bytes()))
 	return &point
 }
 

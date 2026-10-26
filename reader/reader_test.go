@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
 	"reflect"
 	"sync"
 	"testing"
@@ -11,6 +12,8 @@ import (
 	"github.com/gmrtd/gmrtd/cms"
 	"github.com/gmrtd/gmrtd/document"
 	"github.com/gmrtd/gmrtd/iso7816"
+	"github.com/gmrtd/gmrtd/oid"
+	"github.com/gmrtd/gmrtd/pace"
 	"github.com/gmrtd/gmrtd/password"
 	"github.com/gmrtd/gmrtd/utils"
 )
@@ -621,6 +624,39 @@ func TestPerformPaceAllowsBacFallbackOnPaceError(t *testing.T) {
 	}
 }
 
+func TestPerformPaceFallsBackWhenPaceUnsupportedLocally(t *testing.T) {
+	// CardAccess advertises PACE with proprietary domain parameters (id 32), which this reader
+	// does not implement. No PACE command may be sent (PanicTransceiver), and the default
+	// fail-closed policy must not refuse the read: performPace continues to BAC and records
+	// the reason in Session.PaceErr.
+
+	var status MockStatus
+	var nfc *iso7816.NfcSession = iso7816.NewNfcSession(&PanicTransceiver{P: "no PACE command expected"})
+	var reader *Reader = NewReader(&status, nfc, EmptyCscaTrustStore(t))
+
+	pass, err := password.NewPasswordMrzi("123456", "100101", "301225")
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+
+	var state *ReaderState = NewReaderState(nil, nil, pass)
+
+	var cardAccessBytes []byte = utils.HexToBytes("31143012060A04007F00070202040204020102020120")
+	state.docEx.Document.Mf.CardAccess, err = document.NewCardAccess(cardAccessBytes)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+
+	err = performPace(reader, state)
+	if err != nil {
+		t.Fatalf("expected fallback to BAC, got error: %s", err)
+	}
+
+	if !errors.Is(state.docEx.Session.PaceErr, pace.ErrPACEUnsupportedLocally) {
+		t.Fatalf("PaceErr should record ErrPACEUnsupportedLocally; got %v", state.docEx.Session.PaceErr)
+	}
+}
+
 func TestPerformPaceSkipPace(t *testing.T) {
 	// note: skip pace indicated, even though CardAccess present and indicates PACE
 
@@ -918,4 +954,314 @@ func TestReaderConcurrentAccess(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func trustedState(t *testing.T) *ReaderState {
+	t.Helper()
+	state := NewReaderState(nil, nil, password.NewPasswordNil())
+	state.docEx.Session.PassiveAuthResult = &document.PassiveAuthResult{Success: true, CardSec: &document.PassiveAuth{}}
+	return state
+}
+
+func requireAuthenticReader(t *testing.T, transceiver iso7816.Transceiver) *Reader {
+	t.Helper()
+	var status MockStatus
+	reader := NewReader(&status, iso7816.NewNfcSession(transceiver), EmptyCscaTrustStore(t))
+	reader.RequireAuthenticDocument()
+	return reader
+}
+
+func TestRequireAuthenticDocumentDefaultOff(t *testing.T) {
+	var status MockStatus
+	reader := NewReader(&status, iso7816.NewNfcSession(&iso7816.MockTransceiver{}), EmptyCscaTrustStore(t))
+	state := NewReaderState(nil, nil, password.NewPasswordNil())
+	state.docEx.Session.ActiveAuthErr = errors.New("AA failed")
+
+	if err := checkAuthenticDocument(reader, state); err != nil {
+		t.Fatalf("unexpected error with RequireAuthenticDocument unset: %s", err)
+	}
+}
+
+func TestRequireAuthenticDocumentChipRejectsAuth(t *testing.T) {
+	// ISO 7816-4 error status words an (emulated) chip may answer AA INTERNAL AUTHENTICATE
+	// or CA MSE:Set AT with (see #525).
+	statusWords := []string{"6300", "6700", "6800", "6900", "6982", "6A00", "6A80", "6A88", "6B00", "6C00", "6E00", "6F00", "6FFF"}
+
+	protocols := []struct {
+		name  string
+		strip func(doc *document.Document)
+	}{
+		{"AA", func(doc *document.Document) { doc.Mf.Lds1.Dg14 = nil }},
+		{"CA", func(doc *document.Document) { doc.Mf.Lds1.Dg15 = nil }},
+		{"AA+CA", func(_ *document.Document) {}},
+	}
+
+	for _, p := range protocols {
+		for _, sw := range statusWords {
+			t.Run(p.name+"/"+sw, func(t *testing.T) {
+				reader := requireAuthenticReader(t, &iso7816.StaticTransceiver{RApdu: utils.HexToBytes(sw)})
+				state := trustedState(t)
+
+				doc, err := document.SampleDocument()
+				if err != nil {
+					t.Fatalf("SampleDocument error: %s", err)
+				}
+				p.strip(doc)
+				state.docEx.Document = *doc
+
+				if err := performChipAuthentication(reader, state); err != nil {
+					t.Fatalf("unexpected performChipAuthentication error: %s", err)
+				}
+
+				err = checkAuthenticDocument(reader, state)
+				if !errors.Is(err, ErrDocumentNotAuthentic) {
+					t.Fatalf("expected ErrDocumentNotAuthentic, got: %v", err)
+				}
+				session := state.docEx.Session
+				for _, protoErr := range []error{session.ActiveAuthErr, session.ChipAuthErr} {
+					if protoErr != nil && !errors.Is(err, protoErr) {
+						t.Fatalf("error does not wrap protocol error %q: %s", protoErr, err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestCheckAuthenticDocument(t *testing.T) {
+	aaErr := errors.New("AA failed")
+	caErr := errors.New("CA failed")
+	paceErr := errors.New("PACE-CAM failed")
+	paErr := errors.New("PA failed")
+	verifyErr := errors.New("Document.Verify failed")
+
+	testCases := []struct {
+		name    string
+		setup   func(s *document.Session)
+		wantErr []error // nil: expect success
+	}{
+		{
+			name:  "no chip authentication offered",
+			setup: func(_ *document.Session) {},
+		},
+		{
+			name: "AA succeeds",
+			setup: func(s *document.Session) {
+				s.ActiveAuthResult = &document.ActiveAuthResult{Success: true}
+			},
+		},
+		{
+			name: "AA fails but CA succeeds",
+			setup: func(s *document.Session) {
+				s.ActiveAuthResult, s.ActiveAuthErr = &document.ActiveAuthResult{Success: false}, aaErr
+				s.ChipAuthResult = &document.ChipAuthResult{Success: true}
+			},
+		},
+		{
+			name: "PACE-CAM succeeds but AA fails",
+			setup: func(s *document.Session) {
+				s.PaceCamResult = &document.PaceCamResult{Success: true}
+				s.ActiveAuthResult, s.ActiveAuthErr = &document.ActiveAuthResult{Success: false}, aaErr
+			},
+		},
+		{
+			name: "AA fails",
+			setup: func(s *document.Session) {
+				s.ActiveAuthResult, s.ActiveAuthErr = &document.ActiveAuthResult{Success: false}, aaErr
+			},
+			wantErr: []error{ErrDocumentNotAuthentic, aaErr},
+		},
+		{
+			name: "AA and CA fail",
+			setup: func(s *document.Session) {
+				s.ActiveAuthResult, s.ActiveAuthErr = &document.ActiveAuthResult{Success: false}, aaErr
+				s.ChipAuthResult, s.ChipAuthErr = &document.ChipAuthResult{Success: false}, caErr
+			},
+			wantErr: []error{ErrDocumentNotAuthentic, aaErr, caErr},
+		},
+		{
+			name: "AA unsuccessful without error",
+			setup: func(s *document.Session) {
+				s.ActiveAuthResult = &document.ActiveAuthResult{Success: false}
+			},
+			wantErr: []error{ErrDocumentNotAuthentic},
+		},
+		{
+			name: "PACE-CAM succeeds but CardSecurity not verified",
+			setup: func(s *document.Session) {
+				s.PassiveAuthResult.CardSec = nil
+				s.PaceCamResult = &document.PaceCamResult{Success: true}
+			},
+			wantErr: []error{ErrDocumentNotAuthentic},
+		},
+		{
+			name: "PACE-CAM error under BAC fallback",
+			setup: func(s *document.Session) {
+				s.PaceResult = &document.PaceResult{Oid: oid.OidPaceEcdhCamAesCbcCmac128}
+				s.PaceErr = paceErr
+			},
+			wantErr: []error{ErrDocumentNotAuthentic, paceErr},
+		},
+		{
+			name: "PACE-GM error is not a chip authentication attempt",
+			setup: func(s *document.Session) {
+				s.PaceResult = &document.PaceResult{Oid: oid.OidPaceEcdhGmAesCbcCmac128}
+				s.PaceErr = paceErr
+			},
+		},
+		{
+			name: "PACE unsupported locally is not a chip authentication attempt",
+			setup: func(s *document.Session) {
+				s.PaceResult = &document.PaceResult{}
+				s.PaceErr = fmt.Errorf("selectPaceConfig: %w", pace.ErrPACEUnsupportedLocally)
+			},
+		},
+		{
+			name: "passive authentication fails",
+			setup: func(s *document.Session) {
+				s.PassiveAuthResult, s.PassiveAuthErr = &document.PassiveAuthResult{Success: false}, paErr
+				s.ActiveAuthResult = &document.ActiveAuthResult{Success: true}
+			},
+			wantErr: []error{ErrDocumentNotAuthentic, paErr},
+		},
+		{
+			name: "passive authentication not performed",
+			setup: func(s *document.Session) {
+				s.PassiveAuthResult = nil
+			},
+			wantErr: []error{ErrDocumentNotAuthentic},
+		},
+		{
+			name: "Document.Verify fails",
+			setup: func(s *document.Session) {
+				s.DocumentVerifyErr = verifyErr
+			},
+			wantErr: []error{ErrDocumentNotAuthentic, verifyErr},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			reader := requireAuthenticReader(t, &PanicTransceiver{P: "no APDUs expected"})
+			state := trustedState(t)
+			tc.setup(&state.docEx.Session)
+
+			err := checkAuthenticDocument(reader, state)
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("unexpected error: %s", err)
+				}
+				return
+			}
+			for _, want := range tc.wantErr {
+				if !errors.Is(err, want) {
+					t.Fatalf("expected error wrapping %q, got: %v", want, err)
+				}
+			}
+		})
+	}
+}
+
+// TestRequireAuthenticDocumentRealVerification runs the real Document.Verify and Passive
+// Authentication steps before the check, rather than assuming a Passive Authentication result.
+func TestRequireAuthenticDocumentRealVerification(t *testing.T) {
+	ukData, err := os.ReadFile("../verifier/testdata/GBR-099250692.gmrtd")
+	if err != nil {
+		t.Fatalf("ReadFile error: %s", err)
+	}
+
+	masterList, err := cms.DefaultMasterList()
+	if err != nil {
+		t.Fatalf("DefaultMasterList error: %s", err)
+	}
+
+	// the UK CSCA expired on 2026-07-24 and has since been dropped from the master lists
+	var ukCsca cms.GenericCertPool
+	if err := ukCsca.Add(utils.HexToBytes("308205FA308203E2A0030201020204492EAE16300D06092A864886F70D01010B05003041310B3009060355040613026762310E300C060355040A1305554B4B50413122302006035504031319436F756E747279205369676E696E6720417574686F72697479301E170D3130303332343134303230315A170D3236303732343134333230315A3041310B3009060355040613026762310E300C060355040A1305554B4B50413122302006035504031319436F756E747279205369676E696E6720417574686F7269747930820222300D06092A864886F70D01010105000382020F003082020A0282020100C3583682D60EE9DB5E77F3CD27F02C8657ABA30C70A21EBC33FCAFA8E96B5806A090EF29CDC8A4A286F750C4F237CE89A207D460DED39854CFF2BA8F4E7807C655FE1B60E7459FF7E24DE2806EA6823BA8B3DD0A00C80B3DCB8BAE3C4620D9F5A81E3144E7805C96F147AFB13D6C9BAAB3D469EFCA9EADACAD81ED623FCCA82263D72350F553C17DE29352F937CA3EEFDAA902FE718EFC5F90CE9B35027E5F56CD92FDE396B2ACD2C8A83A7F5712CF7DF298607D072B8E82C5DD94BE323D293ADBD25B4F53467AAAE53E92BDD23E26B5501DA24B53E1F492917CA0FA8C59680FB17C952AC642944639B385A06315C251B204DD922E2F86A1D40F1FE3626E602D8D9ED0870C5D0E86ACB0E3845557E63CBB327D9EFFECD317A31FA337AEAC6F9304EB59B63DFEA4D7EC7AC94891D5D8B14F4FB4DB1AA4A88AD5B339FE7DCB460F8231F5B0628A6EA75C3FC252BF00C0D54D850D489346F3753A476A0EA237CAF9001CE729BB2EC2CEA6368F040A2B1B1108A2133EFFE4CA369D043D58A72D0AC1202138CCA1A370B26D576DA079DBDD6C59989F1E40F670AF27E28231ED3F7A5C7F1F699B9AB217F7125993CDA5C0B25147A0C37D08098B85D8B4F231303B1DF92EFAF03E31D92DE00D6971FD4D43971C318DCCB3F1FE908520F5AA788EADE562D0B23F85FF76340C5D181811B2C19529387807EBDD7C5AB09D971F0D3AB516AD0203010001A381F93081F6300E0603551D0F0101FF04040302010630120603551D130101FF040830060101FF02010030630603551D1F045C305A3058A056A054A4523050310B3009060355040613026762310E300C060355040A1305554B4B50413122302006035504031319436F756E747279205369676E696E6720417574686F72697479310D300B0603550403130443524C31302B0603551D1004243022800F32303130303332343134303230315A810F32303236303732343134333230315A301F0603551D230418301680144531A5B73BCF8BB27C7FAC88C74B4505F6C936B3301D0603551D0E041604144531A5B73BCF8BB27C7FAC88C74B4505F6C936B3300D06092A864886F70D01010B0500038202010054F23F6A723698B06338E7A37FB2C740506E2175970C76E20D629D0AB5557359360826E7A611B3748470C1E7995952547C1BB790F4899D258F9127F6C4730F5FF63A8498EAEB50FAF767283B73325B968B497E8C6361073EC25DA7E4C225F36E5870D5874F11BC102F4DC2FEE784F3B3CB9AF3BD3C55F5A72C1883EB2632153B16F594AA086D549228CF0013199D66899181BE47AC0EF37D5F4FE7CB23B8565CD7F4099968DD90791E8EAAE871914BB25C4ABC5556D8387D4964CD87051088431FC32AAC31E37DCEE14BA835C9618E1365216BD227563D99520FD03B101CA7EABFE326BA71B4DE40DA328B2F65E99B591B01FC132C9713BF525238FEDE68A509653C196AA73404D970509D7112EFBC62F385F9642DDE0FBFC7228E0AB388C69E0304B617CC56E4B6253FBD005B22AFF67420F51069AE8D2DC9E5F076E33016AA4E1BBE11A3B79CBA4E41002021639126B7DDC79DC6DF2CD2C1DDB706B825125514F8E5797C409B1B69A8EADA1E95E1FAD139F7C1E189008A5BAB74DF7E87830AF1FBDFC27BD1985CF8DFE5C631AA4F7C0D439D80FB35B34F7722FC0EFBD2B88B4C4BC918EE4E5BD868EB49E1B6858696B364BCEC7D69E494E7DA8198D69A6ABE1F31D01502F5E78550808C2F14CD447E0E56ACDF01A5A145C52EC867232091F1C71800654CC7529557C3414667F9711275B36E92196DD8D600587D4E93FD08D3")); err != nil {
+		t.Fatalf("ukCsca.Add error: %s", err)
+	}
+	masterList.AddCertPool(&ukCsca)
+
+	ukDocument := func(t *testing.T) *document.Document {
+		doc, _, err := document.UnmarshalVerifiableDoc(ukData)
+		if err != nil {
+			t.Fatalf("UnmarshalVerifiableDoc error: %s", err)
+		}
+		return doc
+	}
+
+	sampleDocument := func(t *testing.T) *document.Document {
+		doc, err := document.SampleDocument()
+		if err != nil {
+			t.Fatalf("SampleDocument error: %s", err)
+		}
+		return doc
+	}
+
+	aaErr := errors.New("AA failed")
+
+	testCases := []struct {
+		name    string
+		doc     func(t *testing.T) *document.Document
+		session func(s *document.Session)
+		wantErr []error // nil: expect success
+
+		wantDataTrusted bool
+	}{
+		{
+			// trusted data, and the document offers no AA/CA/PACE-CAM
+			name:    "UK passport",
+			doc:     ukDocument,
+			session: func(_ *document.Session) {},
+
+			wantDataTrusted: true,
+		},
+		{
+			name: "UK passport with failed chip authentication",
+			doc:  ukDocument,
+			session: func(s *document.Session) {
+				s.ActiveAuthResult, s.ActiveAuthErr = &document.ActiveAuthResult{Success: false}, aaErr
+			},
+			wantErr: []error{ErrDocumentNotAuthentic, aaErr},
+
+			wantDataTrusted: true,
+		},
+		{
+			// its data groups come from different ICAO worked examples, so Passive Authentication fails
+			name:    "synthetic sample document",
+			doc:     sampleDocument,
+			session: func(_ *document.Session) {},
+			wantErr: []error{ErrDocumentNotAuthentic},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var status MockStatus
+			reader := NewReader(&status, iso7816.NewNfcSession(&PanicTransceiver{P: "no APDUs expected"}), masterList)
+			reader.RequireAuthenticDocument()
+
+			state := NewReaderState(nil, nil, password.NewPasswordNil())
+			state.docEx.Document = *tc.doc(t)
+			tc.session(&state.docEx.Session)
+
+			err := runSteps(reader, state, verifyDocument, performPassiveAuthentication, checkAuthenticDocument)
+
+			if got := state.docEx.Summary().DataTrusted; got != tc.wantDataTrusted {
+				t.Fatalf("DataTrusted = %v, want %v (PassiveAuthErr: %v, DocumentVerifyErr: %v)",
+					got, tc.wantDataTrusted, state.docEx.Session.PassiveAuthErr, state.docEx.Session.DocumentVerifyErr)
+			}
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("unexpected error: %s", err)
+				}
+				return
+			}
+			for _, want := range tc.wantErr {
+				if !errors.Is(err, want) {
+					t.Fatalf("expected error wrapping %q, got: %v", want, err)
+				}
+			}
+		})
+	}
 }

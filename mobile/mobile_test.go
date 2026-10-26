@@ -1,15 +1,21 @@
 package mobile
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
 	"reflect"
 	"regexp"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/gmrtd/gmrtd/cms"
 	"github.com/gmrtd/gmrtd/document"
 	"github.com/gmrtd/gmrtd/iso7816"
 	"github.com/gmrtd/gmrtd/reader"
+	"github.com/gmrtd/gmrtd/utils"
 )
 
 func TestNewPasswordMrz(t *testing.T) {
@@ -170,6 +176,77 @@ func TestAllowBacFallbackOnPaceError(t *testing.T) {
 
 	if !reader.allowBacFallbackOnPaceError {
 		t.Fatalf("allowBacFallbackOnPaceError should be true after calling AllowBacFallbackOnPaceError()")
+	}
+}
+
+func TestRequireAuthenticDocument(t *testing.T) {
+	reader := &Reader{}
+
+	if reader.requireAuthenticDocument {
+		t.Fatalf("requireAuthenticDocument should default to false")
+	}
+
+	reader.RequireAuthenticDocument()
+
+	if !reader.requireAuthenticDocument {
+		t.Fatalf("requireAuthenticDocument should be true after calling RequireAuthenticDocument()")
+	}
+}
+
+func TestRejectedDocumentHelper(t *testing.T) {
+	doc := &Document{}
+
+	testCases := []struct {
+		name string
+		err  error
+		exp  *Document
+	}{
+		{"not authentic", fmt.Errorf("[ReadDocument] runSteps error: %w", fmt.Errorf("[checkAuthenticDocument] %w: data not trusted", reader.ErrDocumentNotAuthentic)), doc},
+		{"other read error", errors.New("[ReadDocument] runSteps error: transceive failed"), nil},
+		{"no error", nil, nil},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if act := rejectedDocument(doc, tc.err); act != tc.exp {
+				t.Errorf("rejectedDocument (act:%p) (exp:%p)", act, tc.exp)
+			}
+		})
+	}
+}
+
+func TestRejectedDocumentClearedByReadDocument(t *testing.T) {
+	rdr := NewReader(&testReaderStatus{}, &iso7816.StaticTransceiver{})
+	rdr.RequireAuthenticDocument()
+
+	if rdr.RejectedDocument() != nil {
+		t.Fatalf("RejectedDocument should default to nil")
+	}
+
+	rdr.rejectedDocument = &Document{}
+
+	pass, err := NewPasswordCan("123456")
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+
+	// fails before the authenticity check (static transceiver), so nothing is rejected
+	if _, err := rdr.ReadDocument(pass, nil, nil); err == nil {
+		t.Fatalf("expected error")
+	}
+
+	if rdr.RejectedDocument() != nil {
+		t.Errorf("RejectedDocument should be nil after a read that failed for another reason")
+	}
+}
+
+func TestNewGmrtdReaderInvalidAAChallenge(t *testing.T) {
+	// WithAAChallenge rejects a bad length up front, so set the field directly to reach the
+	// defensive check in the underlying reader.
+	r := &Reader{aaChallenge: make([]byte, 3)}
+
+	if _, err := r.newGmrtdReader(iso7816.NewNfcSession(&iso7816.StaticTransceiver{}), &cms.GenericCertPool{}); err == nil {
+		t.Fatalf("expected error for invalid AA challenge")
 	}
 }
 
@@ -580,7 +657,7 @@ func TestNewSampleDocument(t *testing.T) {
 
 // Regression test for a heap-corruption crash observed under concurrent use
 // on iOS: a shared mobile.Reader's fields (maxRead/skipPace/skipImages/
-// aaChallenge) were written by the configuration methods while ReadDocument
+// requireAuthenticDocument/aaChallenge/rejectedDocument) were written by the configuration methods while ReadDocument
 // read them from another goroutine, unsynchronised - exactly the kind of
 // race that manifests as a Go runtime fatal error (e.g.
 // "bulkBarrierPreWrite: unaligned arguments") rather than a clean panic. Run
@@ -602,8 +679,10 @@ func TestReaderConcurrentAccess(t *testing.T) {
 			reader.SkipPace()
 			reader.SkipImages()
 			reader.AllowBacFallbackOnPaceError()
+			reader.RequireAuthenticDocument()
 			_, _ = reader.WithAAChallenge(make([]byte, 8))
 			_, _ = reader.ReadDocument(pass, nil, nil) // expected to fail fast (static transceiver)
+			_ = reader.RejectedDocument()
 		}()
 	}
 	wg.Wait()
@@ -653,5 +732,112 @@ func TestReadDocumentNilStatusReportsRealError(t *testing.T) {
 
 	if strings.Contains(err.Error(), "nil pointer") {
 		t.Errorf("nil ReaderStatus masked the read error (act:%s)", err)
+	}
+}
+
+func TestVerifierWithTrustedSource(t *testing.T) {
+	var empty document.DocumentEx
+	data, err := empty.ToCbor()
+	if err != nil {
+		t.Fatalf("ToCbor error: %s", err)
+	}
+
+	for _, trusted := range []bool{false, true} {
+		v := NewVerifier()
+		if trusted {
+			v = v.WithTrustedSource()
+		}
+
+		doc, err := v.Verify(data)
+		if err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+
+		offline := doc.documentEx.Session.Offline
+		if offline == nil || offline.TrustedSource != trusted {
+			t.Errorf("Session.Offline = %+v, want TrustedSource=%v", offline, trusted)
+		}
+	}
+}
+
+// Same real fixture as verifier.TestVerifyRealDocumentGBR: the mobile Verifier must give the same
+// verdict as the Go verifier.
+func TestVerifierRealDocumentGBR(t *testing.T) {
+	data, err := os.ReadFile("../verifier/testdata/GBR-099250692.gmrtd")
+	if err != nil {
+		t.Fatalf("ReadFile error: %s", err)
+	}
+
+	// the UK CSCA expired on 2026-07-24 and has since been dropped from the master lists
+	defaultPool, err := getCscaCertPool()
+	if err != nil {
+		t.Fatalf("getCscaCertPool error: %s", err)
+	}
+	var ukCsca cms.GenericCertPool
+	if err := ukCsca.Add(utils.HexToBytes("308205FA308203E2A0030201020204492EAE16300D06092A864886F70D01010B05003041310B3009060355040613026762310E300C060355040A1305554B4B50413122302006035504031319436F756E747279205369676E696E6720417574686F72697479301E170D3130303332343134303230315A170D3236303732343134333230315A3041310B3009060355040613026762310E300C060355040A1305554B4B50413122302006035504031319436F756E747279205369676E696E6720417574686F7269747930820222300D06092A864886F70D01010105000382020F003082020A0282020100C3583682D60EE9DB5E77F3CD27F02C8657ABA30C70A21EBC33FCAFA8E96B5806A090EF29CDC8A4A286F750C4F237CE89A207D460DED39854CFF2BA8F4E7807C655FE1B60E7459FF7E24DE2806EA6823BA8B3DD0A00C80B3DCB8BAE3C4620D9F5A81E3144E7805C96F147AFB13D6C9BAAB3D469EFCA9EADACAD81ED623FCCA82263D72350F553C17DE29352F937CA3EEFDAA902FE718EFC5F90CE9B35027E5F56CD92FDE396B2ACD2C8A83A7F5712CF7DF298607D072B8E82C5DD94BE323D293ADBD25B4F53467AAAE53E92BDD23E26B5501DA24B53E1F492917CA0FA8C59680FB17C952AC642944639B385A06315C251B204DD922E2F86A1D40F1FE3626E602D8D9ED0870C5D0E86ACB0E3845557E63CBB327D9EFFECD317A31FA337AEAC6F9304EB59B63DFEA4D7EC7AC94891D5D8B14F4FB4DB1AA4A88AD5B339FE7DCB460F8231F5B0628A6EA75C3FC252BF00C0D54D850D489346F3753A476A0EA237CAF9001CE729BB2EC2CEA6368F040A2B1B1108A2133EFFE4CA369D043D58A72D0AC1202138CCA1A370B26D576DA079DBDD6C59989F1E40F670AF27E28231ED3F7A5C7F1F699B9AB217F7125993CDA5C0B25147A0C37D08098B85D8B4F231303B1DF92EFAF03E31D92DE00D6971FD4D43971C318DCCB3F1FE908520F5AA788EADE562D0B23F85FF76340C5D181811B2C19529387807EBDD7C5AB09D971F0D3AB516AD0203010001A381F93081F6300E0603551D0F0101FF04040302010630120603551D130101FF040830060101FF02010030630603551D1F045C305A3058A056A054A4523050310B3009060355040613026762310E300C060355040A1305554B4B50413122302006035504031319436F756E747279205369676E696E6720417574686F72697479310D300B0603550403130443524C31302B0603551D1004243022800F32303130303332343134303230315A810F32303236303732343134333230315A301F0603551D230418301680144531A5B73BCF8BB27C7FAC88C74B4505F6C936B3301D0603551D0E041604144531A5B73BCF8BB27C7FAC88C74B4505F6C936B3300D06092A864886F70D01010B0500038202010054F23F6A723698B06338E7A37FB2C740506E2175970C76E20D629D0AB5557359360826E7A611B3748470C1E7995952547C1BB790F4899D258F9127F6C4730F5FF63A8498EAEB50FAF767283B73325B968B497E8C6361073EC25DA7E4C225F36E5870D5874F11BC102F4DC2FEE784F3B3CB9AF3BD3C55F5A72C1883EB2632153B16F594AA086D549228CF0013199D66899181BE47AC0EF37D5F4FE7CB23B8565CD7F4099968DD90791E8EAAE871914BB25C4ABC5556D8387D4964CD87051088431FC32AAC31E37DCEE14BA835C9618E1365216BD227563D99520FD03B101CA7EABFE326BA71B4DE40DA328B2F65E99B591B01FC132C9713BF525238FEDE68A509653C196AA73404D970509D7112EFBC62F385F9642DDE0FBFC7228E0AB388C69E0304B617CC56E4B6253FBD005B22AFF67420F51069AE8D2DC9E5F076E33016AA4E1BBE11A3B79CBA4E41002021639126B7DDC79DC6DF2CD2C1DDB706B825125514F8E5797C409B1B69A8EADA1E95E1FAD139F7C1E189008A5BAB74DF7E87830AF1FBDFC27BD1985CF8DFE5C631AA4F7C0D439D80FB35B34F7722FC0EFBD2B88B4C4BC918EE4E5BD868EB49E1B6858696B364BCEC7D69E494E7DA8198D69A6ABE1F31D01502F5E78550808C2F14CD447E0E56ACDF01A5A145C52EC867232091F1C71800654CC7529557C3414667F9711275B36E92196DD8D600587D4E93FD08D3")); err != nil {
+		t.Fatalf("ukCsca.Add error: %s", err)
+	}
+	var pool cms.CombinedCertPool
+	pool.AddCertPool(defaultPool)
+	pool.AddCertPool(&ukCsca)
+	cscaCertPool = &pool
+	t.Cleanup(func() { cscaCertPool = defaultPool })
+
+	doc, err := NewVerifier().Verify(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+
+	summary := doc.documentEx.Summary()
+	if !summary.DataTrusted {
+		t.Errorf("expected DataTrusted (PassiveAuthErr=%v)", doc.documentEx.Session.PassiveAuthErr)
+	}
+	if summary.ChipAuthenticity != document.CHIP_AUTH_STATUS_NONE {
+		t.Errorf("ChipAuthenticity = %v, want NONE", summary.ChipAuthenticity)
+	}
+
+	assertSummaryJsonTrustChain(t, doc, document.PASSIVE_AUTH_STATUS_VERIFIED, true, "CN=Document Signing Key 35, OU=london, O=ukps, C=gb")
+}
+
+func TestSampleDocumentSummaryJsonTrustChain(t *testing.T) {
+	doc, err := NewSampleDocument()
+	if err != nil {
+		t.Fatalf("NewSampleDocument error: %s", err)
+	}
+
+	// Passive Authentication fails for the sample document, so only its unverified signer is shown
+	assertSummaryJsonTrustChain(t, doc, document.PASSIVE_AUTH_STATUS_FAILED, false, "CN=DS-AUSTRIA-eMRTD, SERIALNUMBER=004015, OU=BMI, O=GV, C=AT")
+}
+
+// assertSummaryJsonTrustChain checks the trust chain as a mobile client receives it via SummaryJson.
+func assertSummaryJsonTrustChain(t *testing.T, doc *Document, wantStatus document.PassiveAuthStatus, wantVerified bool, wantSigner string) {
+	t.Helper()
+	jsonData, err := doc.SummaryJson()
+	if err != nil {
+		t.Fatalf("SummaryJson error: %s", err)
+	}
+
+	var summary struct {
+		PassiveAuth struct {
+			Status string `json:"status"`
+			Sod    struct {
+				Verified bool `json:"verified"`
+				Chain    []struct {
+					Role    string `json:"role"`
+					Subject string `json:"subject"`
+				} `json:"chain"`
+			} `json:"sod"`
+		} `json:"passiveAuth"`
+	}
+	if err := json.Unmarshal(jsonData, &summary); err != nil {
+		t.Fatalf("json.Unmarshal error: %s", err)
+	}
+
+	pa := summary.PassiveAuth
+	if pa.Status != string(wantStatus) || pa.Sod.Verified != wantVerified || len(pa.Sod.Chain) < 1 {
+		t.Fatalf("passiveAuth = %+v, want status %s, verified %v", pa, wantStatus, wantVerified)
+	}
+	if signer := pa.Sod.Chain[0]; signer.Role != string(document.CERTIFICATE_ROLE_DOCUMENT_SIGNER) || signer.Subject != wantSigner {
+		t.Errorf("chain[0] = %s %q, want DOCUMENT_SIGNER %q", signer.Role, signer.Subject, wantSigner)
 	}
 }

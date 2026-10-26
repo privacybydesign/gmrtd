@@ -21,7 +21,7 @@ var (
 //go:embed master_list/DE_ROOT_CA_CSCA07.cer
 var de_masterListRootCA []byte
 
-//go:embed master_list/DE_ML_2026-08-19-10-28-54.ml
+//go:embed master_list/DE_ML_2026-10-01-11-50-52.ml
 var de_masterList []byte
 
 /*
@@ -32,7 +32,7 @@ var de_masterList []byte
 //go:embed master_list/NL_ROOT_CA.cer
 var nl_masterListRootCA []byte
 
-//go:embed master_list/NL_ML_2026-07-22.ml
+//go:embed master_list/NL_ML_2026-10-20.ml
 var nl_masterList []byte
 
 //go:embed master_list/IDN_2010_SERIES_CSCA_CERT/2010-12_CSCA.cer
