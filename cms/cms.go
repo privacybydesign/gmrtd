@@ -972,12 +972,12 @@ func (si *SignerInfo) VerifyWithConfig(config *CMSConfig, sd *SignedData, truste
 }
 
 // resolveSigningTime extracts and parses the signingTime authenticated attribute, for use
-// as the reference time in certificate validity checks. Returns nil (with a warning logged)
-// if the attribute is absent or malformed.
+// as the reference time in certificate validity checks. Returns nil if the attribute
+// is absent (debug logged) or malformed (warning logged).
 func (si *SignerInfo) resolveSigningTime() *time.Time {
 	aaSigningTime := si.AuthenticatedAttributes.ByOID(oid.OidSigningTime)
 	if aaSigningTime == nil {
-		slog.Warn("Verify - signingTime attribute absent, skipping validity check")
+		slog.Debug("Verify - signingTime attribute absent, skipping validity check")
 		return nil
 	}
 
@@ -1079,6 +1079,21 @@ func (si *SignerInfo) prepareVerificationData(config *CMSConfig, sd *SignedData)
 }
 
 // selectCertificate finds the appropriate certificate from the signed data by matching the SignerIdentifier (SID).
+// SignerCertificates returns the embedded certificate selected by each SignerInfo, in
+// SignerInfo order, without verifying it. It lets callers show who claims to have signed the
+// data even when verification fails, so the result must be treated as unverified.
+func (sd *SignedData) SignerCertificates() ([]Certificate, error) {
+	certs := make([]Certificate, 0, len(sd.SignerInfos))
+	for i := range sd.SignerInfos {
+		cert, err := sd.SignerInfos[i].selectCertificate(sd)
+		if err != nil {
+			return nil, fmt.Errorf("[SignerCertificates] SignerInfo(idx:%d): %w", i, err)
+		}
+		certs = append(certs, *cert)
+	}
+	return certs, nil
+}
+
 func (si *SignerInfo) selectCertificate(sd *SignedData) (*Certificate, error) {
 	var sdCerts *GenericCertPool = &GenericCertPool{}
 

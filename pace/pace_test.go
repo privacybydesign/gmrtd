@@ -5,7 +5,10 @@ import (
 	"crypto/elliptic"
 	"encoding/asn1"
 	"errors"
+	"github.com/gmrtd/gmrtd/internal/testlog"
+	"log/slog"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/gmrtd/gmrtd/cryptoutils"
@@ -217,6 +220,128 @@ func TestSelectPaceConfigErrors(t *testing.T) {
 	}
 }
 
+// An advertised entry this reader can't use must not stop it from using another, supported one
+// (ICAO 9303 lets the terminal choose any advertised PACEInfo it supports).
+func TestSelectPaceConfigSkipsUnusable(t *testing.T) {
+	const (
+		camAes256Proprietary = "3012060a04007f00070202040604020102020120" // ECDH-CAM-AES-256, id 32 (proprietary)
+		camAes256Rfu         = "3012060a04007f00070202040604020102020103" // ECDH-CAM-AES-256, id 3 (RFU)
+		camAes256NoParamId   = "300f060a04007f00070202040604020102"       // ECDH-CAM-AES-256, no ParameterId
+		gmAes128Bp256        = "3012060a04007f0007020204020202010202010d" // ECDH-GM-AES-128, id 13 (brainpoolP256r1)
+	)
+
+	testCases := []struct {
+		name            string
+		cardAccessBytes []byte
+	}{
+		{name: "proprietary params preferred by weighting", cardAccessBytes: utils.HexToBytes("3128" + camAes256Proprietary + gmAes128Bp256)},
+		{name: "proprietary params, reversed order", cardAccessBytes: utils.HexToBytes("3128" + gmAes128Bp256 + camAes256Proprietary)},
+		{name: "RFU params", cardAccessBytes: utils.HexToBytes("3128" + camAes256Rfu + gmAes128Bp256)},
+		{name: "missing ParameterId", cardAccessBytes: utils.HexToBytes("3125" + camAes256NoParamId + gmAes128Bp256)},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			prevLogger := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+			t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+			cardAccess, err := document.NewCardAccess(tc.cardAccessBytes)
+			if err != nil {
+				t.Fatalf("Unexpected NewCardAccess() error: %s", err)
+			}
+
+			paceConfig, domainParams, err := selectPaceConfig(cardAccess)
+			if err != nil {
+				t.Fatalf("unexpected selectPaceConfig error: %s", err)
+			}
+
+			if !paceConfig.oid.Equal(oid.OidPaceEcdhGmAesCbcCmac128) {
+				t.Errorf("Invalid PACE OID (%s)", paceConfig.oid)
+			}
+			if domainParams.id != 13 {
+				t.Errorf("Invalid ParameterId (%d)", domainParams.id)
+			}
+			if !strings.Contains(logs.String(), "level=WARN msg=\"selectPaceConfig: skipping PACE info\" protocol=0.4.0.127.0.7.2.2.4.6.4") {
+				t.Errorf("expected a warning for the skipped CAM entry, got logs:\n%s", logs.String())
+			}
+		})
+	}
+}
+
+func TestSelectPaceConfigUnsupportedLocally(t *testing.T) {
+	testCases := []struct {
+		name            string
+		cardAccessBytes []byte
+		local           bool
+	}{
+		{
+			// no PACE protocol OID implemented by this reader
+			name:            "unknown protocol OIDs",
+			cardAccessBytes: utils.HexToBytes("31283012060a04007f0007020204027f0201020201103012060a04007f0007020204067f020102020110"),
+			local:           true,
+		},
+		{
+			// ECDH-GM-AES-256 with proprietary domain parameters (id 32)
+			name:            "proprietary domain parameters",
+			cardAccessBytes: utils.HexToBytes("31143012060A04007F00070202040204020102020120"),
+			local:           true,
+		},
+		{
+			// ECDH-GM-AES-256 with standardised but not implemented domain parameters (id 1)
+			name:            "domain parameters not implemented",
+			cardAccessBytes: utils.HexToBytes("31143012060A04007F00070202040204020102020101"),
+			local:           true,
+		},
+		{
+			// ECDH-GM-AES-256 with RFU domain parameters (id 3): chip non-conformance
+			name:            "RFU domain parameters",
+			cardAccessBytes: utils.HexToBytes("31143012060A04007F00070202040204020102020103"),
+			local:           false,
+		},
+		{
+			name:            "missing ParameterId",
+			cardAccessBytes: utils.HexToBytes("3111300F060a04007f00070202040604020102"),
+			local:           false,
+		},
+		{
+			// ECDH-IM-AES-128 / brainpoolP256r1: PACE-IM is not implemented
+			name:            "PACE-IM only",
+			cardAccessBytes: utils.HexToBytes("31143012060A04007F0007020204040202010202010D"),
+			local:           true,
+		},
+		{
+			// ECDH-CAM-AES-256 / id 32 (proprietary) + ECDH-GM-AES-256 / id 1 (not implemented)
+			name:            "several entries, all unsupported locally",
+			cardAccessBytes: utils.HexToBytes("31283012060a04007f000702020406040201020201203012060a04007f00070202040204020102020101"),
+			local:           true,
+		},
+		{
+			// ECDH-CAM-AES-256 / id 32 (proprietary) + ECDH-GM-AES-256 / id 3 (RFU): the
+			// non-conformant entry keeps the overall result failing closed
+			name:            "several entries, one non-conformant",
+			cardAccessBytes: utils.HexToBytes("31283012060a04007f000702020406040201020201203012060a04007f00070202040204020102020103"),
+			local:           false,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			cardAccess, err := document.NewCardAccess(tc.cardAccessBytes)
+			if err != nil {
+				t.Fatalf("Unexpected NewCardAccess() error: %s", err)
+			}
+
+			_, _, err = selectPaceConfig(cardAccess)
+			if err == nil {
+				t.Fatal("Error expected")
+			}
+			if got := errors.Is(err, ErrPACEUnsupportedLocally); got != tc.local {
+				t.Fatalf("errors.Is(err, ErrPACEUnsupportedLocally) = %v, want %v (err: %s)", got, tc.local, err)
+			}
+		})
+	}
+}
+
 func TestDoPaceNoCardAccessFile(t *testing.T) {
 	var err error
 	var doc document.Document
@@ -252,6 +377,8 @@ func TestDoPaceNoCardAccessFile(t *testing.T) {
 
 // PACE test for GM (ECDH) based on worked example in ICAO9303 p11 specs (Appendix G1)
 func TestDoPace_GM_ECDH(t *testing.T) {
+	logs := testlog.CaptureDebug(t)
+
 	var nfc *iso7816.NfcSession
 
 	{
@@ -317,6 +444,13 @@ func TestDoPace_GM_ECDH(t *testing.T) {
 	if err != nil {
 		t.Errorf("Unexpected error: %s", err)
 	}
+	testlog.AssertNoSecrets(t, logs.String(), map[string]string{
+		"password":                           pass.Password,
+		"terminal key-agreement private key": "7F4EF07B9EA82FD78AD689B38D0BC78CF21F249D953BC46F4C6E19259C010F99",
+		"terminal mapping private key":       "A73FB703AC1436A18E0CFA5ABB3F7BEC7A070E7A6788486BEE230C4A22762595",
+		"ksEnc":                              "F5F0E35C0D7161EE6724EE513A0D9A7F",
+		"ksMac":                              "FE251C7858B356B24514B3BD5F4297D1",
+	})
 
 	// verify Result is as expected
 	var expPaceResult *document.PaceResult = &document.PaceResult{Success: true, Oid: oid.OidPaceEcdhGmAesCbcCmac128, ParameterId: 13}
@@ -1384,23 +1518,43 @@ func TestMapNonceGmEcDhSamePublicKeys(t *testing.T) {
 
 // ---- DoPACE ----
 
-// TestDoPace_IM verifies that PACE-IM returns a "not implemented" error.
+// TestDoPace_IM verifies that a PACE-IM-only chip is rejected at selection as unsupported
+// locally, before any PACE command is sent.
 func TestDoPace_IM(t *testing.T) {
+	var doc document.Document
+	var err error
+	doc.Mf.CardAccess, err = document.NewCardAccess(utils.HexToBytes("31143012060A04007F0007020204040202010202010D"))
+	if err != nil {
+		t.Fatalf("NewCardAccess error: %s", err)
+	}
+
+	// no request/response pairs: any APDU sent would fail with an error not wrapping ErrPACEUnsupportedLocally
+	nfc := iso7816.NewNfcSession(new(iso7816.MockTransceiver))
+
+	_, _, err = NewPace(nfc, &doc, password.NewPasswordCan("123456")).DoPACE()
+	if !errors.Is(err, ErrPACEUnsupportedLocally) {
+		t.Fatalf("expected ErrPACEUnsupportedLocally, got %v", err)
+	}
+}
+
+// TestDoPace_GM_MappingError verifies that a failure in the mapping step (after MSE:Set AT and
+// GetNonce succeed) is returned as a DoPACE error rather than a successful result.
+func TestDoPace_GM_MappingError(t *testing.T) {
 	pass := password.NewPasswordCan("123456")
 
-	imConfig, err := paceConfigGetByOID(oid.OidPaceEcdhImAesCbcCmac128)
+	gmConfig, err := paceConfigGetByOID(oid.OidPaceEcdhGmAesCbcCmac128)
 	if err != nil {
 		t.Fatalf("paceConfigGetByOID error: %s", err)
 	}
 
-	// Derive kKdf so we can construct a valid encrypted nonce for the mock
+	// derive kKdf so we can construct a valid encrypted nonce for the mock
 	canKey, err := pass.Key()
 	if err != nil {
 		t.Fatalf("pass.Key error: %s", err)
 	}
-	kKdf := cryptoutils.KDF(canKey, cryptoutils.KDF_COUNTER_PACE, imConfig.cipher, imConfig.keyLengthBits)
+	kKdf := cryptoutils.KDF(canKey, cryptoutils.KDF_COUNTER_PACE, gmConfig.cipher, gmConfig.keyLengthBits)
 
-	bcipher, err := cryptoutils.CipherForKey(imConfig.cipher, kKdf)
+	bcipher, err := cryptoutils.CipherForKey(gmConfig.cipher, kKdf)
 	if err != nil {
 		t.Fatalf("CipherForKey error: %s", err)
 	}
@@ -1409,21 +1563,40 @@ func TestDoPace_IM(t *testing.T) {
 		t.Fatalf("CryptCBC error: %s", err)
 	}
 
+	// MSE:Set AT and GetNonce succeed; the mapping APDU has no response, so mapping fails
 	var transceiver *iso7816.MockTransceiver = new(iso7816.MockTransceiver)
-	transceiver.AddReqRsp("0022C1A412800A04007F0007020204040283010284010D", "9000")
+	transceiver.AddReqRsp("0022C1A412800A04007F0007020204020283010284010D", "9000")
 	transceiver.AddReqRsp("10860000027C0000", "7C128010"+utils.BytesToHex(encryptedNonce)+"9000")
 
-	nfc := iso7816.NewNfcSession(transceiver)
-
 	var doc document.Document
-	doc.Mf.CardAccess, err = document.NewCardAccess(utils.HexToBytes("31143012060A04007F0007020204040202010202010D"))
+	doc.Mf.CardAccess, err = document.NewCardAccess(utils.HexToBytes("31143012060A04007F0007020204020202010202010D"))
 	if err != nil {
 		t.Fatalf("NewCardAccess error: %s", err)
 	}
 
-	_, _, err = NewPace(nfc, &doc, pass).DoPACE()
+	result, _, err := NewPace(iso7816.NewNfcSession(transceiver), &doc, pass).DoPACE()
 	if err == nil {
-		t.Fatalf("Expected PACE-IM not-implemented error")
+		t.Fatalf("expected mapping error")
+	}
+	if !strings.Contains(err.Error(), "doMapping error") {
+		t.Fatalf("expected doMapping error, got %v", err)
+	}
+	if result == nil || result.Success {
+		t.Fatalf("expected unsuccessful PaceResult, got %+v", result)
+	}
+}
+
+func TestDoMappingUnsupportedMapping(t *testing.T) {
+	imConfig, err := paceConfigGetByOID(oid.OidPaceEcdhImAesCbcCmac128)
+	if err != nil {
+		t.Fatalf("paceConfigGetByOID error: %s", err)
+	}
+
+	// no request/response pairs: the mapping must be rejected before any APDU is sent
+	pace := NewPace(iso7816.NewNfcSession(new(iso7816.MockTransceiver)), &document.Document{}, password.NewPasswordCan("123456"))
+
+	if _, err = pace.doMapping(imConfig, nil, nil); err == nil {
+		t.Fatalf("expected error for unsupported PACE mapping (IM)")
 	}
 }
 
@@ -1471,5 +1644,110 @@ func TestVerifyEvidenceDecryptEcadICError(t *testing.T) {
 	_, err := VerifyEvidence(doc, &tampered)
 	if err == nil {
 		t.Fatalf("Expected error for non-block-aligned EcadIC")
+	}
+}
+
+// abortingOnExtendedLeTransceiver models a chip (e.g. a French ID card) that rejects an extended
+// Le on GENERAL AUTHENTICATE with 6700 and aborts PACE when doing so: GENERAL AUTHENTICATE then
+// fails with 6985 until PACE is restarted with MSE:Set AT.
+type abortingOnExtendedLeTransceiver struct {
+	iso7816.MockTransceiver
+	aborted bool
+}
+
+func (t *abortingOnExtendedLeTransceiver) Transceive(cla, ins, p1, p2 int, data []byte, le int, encoded []byte) []byte {
+	switch {
+	case ins == int(iso7816.INS_MANAGE_SE):
+		t.aborted = false
+	case ins == int(iso7816.INS_GENERAL_AUTHENTICATE) && le > 256:
+		t.aborted = true
+		return utils.HexToBytes("6700")
+	case ins == int(iso7816.INS_GENERAL_AUTHENTICATE) && t.aborted:
+		return utils.HexToBytes("6985")
+	}
+	return t.MockTransceiver.Transceive(cla, ins, p1, p2, data, le, encoded)
+}
+
+// PACE must restart from MSE:Set AT (not just resend GENERAL AUTHENTICATE) when the chip rejects
+// an extended Le, then complete with a short Le. Same worked example as TestDoPace_GM_ECDH.
+func TestDoPace_GM_ECDH_RestartsAfterExtendedLeRejected(t *testing.T) {
+	transceiver := new(abortingOnExtendedLeTransceiver)
+	transceiver.AddReqRsp("0022C1A412800A04007F0007020204020283010184010D", "9000")
+	transceiver.AddReqRsp("10860000027C0000", "7C12801095A3A016522EE98D01E76CB6B98B42C39000")
+	transceiver.AddReqRsp("10860000457C438141047ACF3EFC982EC45565A4B155129EFBC74650DCBFA6362D896FC70262E0C2CC5E544552DCB6725218799115B55C9BAA6D9F6BC3A9618E70C25AF71777A9C4922D00", "7C43824104824FBA91C9CBE26BEF53A0EBE7342A3BF178CEA9F45DE0B70AA601651FBA3F5730D8C879AAA9C9F73991E61B58F4D52EB87A0A0C709A49DC63719363CCD13C549000")
+	transceiver.AddReqRsp("10860000457C438341042DB7A64C0355044EC9DF190514C625CBA2CEA48754887122F3A5EF0D5EDD301C3556F3B3B186DF10B857B58F6A7EB80F20BA5DC7BE1D43D9BF850149FBB3646200", "7C438441049E880F842905B8B3181F7AF7CAA9F0EFB743847F44A306D2D28C1D9EC65DF6DB7764B22277A2EDDC3C265A9F018F9CB852E111B768B326904B59A0193776F0949000")
+	transceiver.AddReqRsp("008600000C7C0A8508C2B0BD78D94BA86600", "7C0A86083ABB9674BCE93C089000")
+
+	nfc := iso7816.NewNfcSession(transceiver)
+	nfc.SetMaxLe(65536)
+
+	doc := document.Document{}
+	var err error
+	doc.Mf.CardAccess, err = document.NewCardAccess(utils.HexToBytes("31143012060A04007F0007020204020202010202010D"))
+	if err != nil {
+		t.Fatalf("Unexpected error: %s", err)
+	}
+	pass, err := password.NewPasswordMrzi("T22000129", "640812", "101031")
+	if err != nil {
+		t.Fatalf("Unexpected error: %s", err)
+	}
+
+	pace := NewPace(nfc, &doc, pass)
+	var idx int
+	pace.keyGeneratorEc = func(ec elliptic.Curve) cryptoutils.EcKeypair {
+		idx++
+		switch idx {
+		case 1:
+			return cryptoutils.NewEcKeypair(
+				utils.HexToBytes("7F4EF07B9EA82FD78AD689B38D0BC78CF21F249D953BC46F4C6E19259C010F99"),
+				utils.HexToBytes("7ACF3EFC982EC45565A4B155129EFBC74650DCBFA6362D896FC70262E0C2CC5E"),
+				utils.HexToBytes("544552DCB6725218799115B55C9BAA6D9F6BC3A9618E70C25AF71777A9C4922D"))
+		case 2:
+			return cryptoutils.NewEcKeypair(utils.HexToBytes("A73FB703AC1436A18E0CFA5ABB3F7BEC7A070E7A6788486BEE230C4A22762595"), []byte{0}, []byte{0})
+		}
+		t.Fatalf("Invalid key-gen index (idx:%1d)", idx)
+		return cryptoutils.EcKeypair{}
+	}
+
+	paceResult, _, err := pace.DoPACE()
+	if err != nil {
+		t.Fatalf("Unexpected error: %s", err)
+	}
+	if !paceResult.Success {
+		t.Errorf("expected PACE success")
+	}
+
+	// MSE:Set AT, GA (extended Le) -> 6700, then restart: MSE:Set AT + 4x GA (short Le)
+	var ins []byte
+	for _, entry := range nfc.ApduLog().Entries {
+		ins = append(ins, entry.Tx[1])
+	}
+	expIns := []byte{0x22, 0x86, 0x22, 0x86, 0x86, 0x86, 0x86}
+	if !bytes.Equal(ins, expIns) {
+		t.Errorf("APDU sequence (INS) = %x, want %x", ins, expIns)
+	}
+}
+
+// A chip rejecting MSE:Set AT fails PACE with that error (no restart).
+func TestDoPace_MseSetATRejected(t *testing.T) {
+	nfc := iso7816.NewNfcSession(&iso7816.StaticTransceiver{RApdu: utils.HexToBytes("6A80")})
+
+	doc := document.Document{}
+	var err error
+	doc.Mf.CardAccess, err = document.NewCardAccess(utils.HexToBytes("31143012060A04007F0007020204020202010202010D"))
+	if err != nil {
+		t.Fatalf("Unexpected error: %s", err)
+	}
+	pass, err := password.NewPasswordMrzi("T22000129", "640812", "101031")
+	if err != nil {
+		t.Fatalf("Unexpected error: %s", err)
+	}
+
+	_, _, err = NewPace(nfc, &doc, pass).DoPACE()
+	if err == nil || !strings.Contains(err.Error(), "doApduMseSetAT") {
+		t.Errorf("expected doApduMseSetAT error, got: %v", err)
+	}
+	if n := len(nfc.ApduLog().Entries); n != 1 {
+		t.Errorf("expected 1 APDU (no restart), got %d", n)
 	}
 }

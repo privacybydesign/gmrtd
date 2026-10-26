@@ -9,13 +9,10 @@ name: Lint
 #    bump, plus a handful of style nits), spread across many unrelated files -
 #    fixing that is a separate cleanup pass, not something every future PR
 #    should be blocked on.
-#  - govulncheck currently reports 2 real vulnerabilities in the Go 1.26.5
-#    standard library itself (GO-2026-6091 in html/template, reachable via
-#    htmlreport.executeDocumentTemplate; GO-2026-5972, a missing recursion-depth
-#    limit in encoding/asn1, reachable via cms.Validity.Parse and
-#    iso39794.ProcessISO39794p5) - both already fixed upstream in Go 1.26.6, so
-#    this will go green on its own once the toolchain here is bumped, no gmrtd
-#    code change needed.
+#  - govulncheck findings so far have all been in the Go standard library
+#    (e.g. GO-2026-5972 in encoding/asn1, reachable from chip data via
+#    cms.Validity.Parse) and are fixed by raising the `go` directive in go.mod,
+#    which every workflow uses as its toolchain version (see #554).
 # Revisit making these blocking once the above are addressed.
 
 on:
@@ -30,9 +27,9 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
 
@@ -48,7 +45,7 @@ jobs:
         run: make fmt
 
       - name: Install staticcheck
-        run: go install honnef.co/go/tools/cmd/staticcheck@latest
+        run: go install honnef.co/go/tools/cmd/staticcheck@v0.8.1
 
       - name: staticcheck (informational - see workflow header)
         continue-on-error: true
@@ -57,9 +54,9 @@ jobs:
   govulncheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
 
@@ -69,7 +66,7 @@ jobs:
           sudo apt-get -y install libpcsclite-dev
 
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
 
       - name: govulncheck (informational - see workflow header)
         continue-on-error: true

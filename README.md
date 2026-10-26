@@ -7,6 +7,7 @@
 [![Code Smells](https://sonarcloud.io/api/project_badges/measure?project=gmrtd_gmrtd&metric=code_smells)](https://sonarcloud.io/summary/new_code?id=gmrtd_gmrtd)
 [![Technical Debt](https://sonarcloud.io/api/project_badges/measure?project=gmrtd_gmrtd&metric=sqale_index)](https://sonarcloud.io/summary/new_code?id=gmrtd_gmrtd)
 [![codecov](https://codecov.io/gh/gmrtd/gmrtd/graph/badge.svg?token=DRKVXTREWV)](https://codecov.io/gh/gmrtd/gmrtd)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/gmrtd/gmrtd/badge)](https://scorecard.dev/viewer/?uri=github.com/gmrtd/gmrtd)
 
 # gmrtd
 Go library for reading **Machine Readable Travel Documents (MRTDs)** such as passports and identity cards, as specified by **ICAO Doc 9303**.
@@ -99,6 +100,10 @@ go run ./cmd/gmrtd-reader --can <CAN>
 
 # skip PACE negotiation (forces BAC where possible; mostly for debugging)
 --skipPace
+
+# fail unless the data is trusted (Passive Authentication) and, where the chip
+# offers AA/CA/PACE-CAM, at least one of them verified
+--requireAuthenticDocument
 ```
 
 > Notes:
@@ -107,6 +112,8 @@ go run ./cmd/gmrtd-reader --can <CAN>
 
 # ✅ Offline Document Verifier (gmrtd-verify)
 Verifies a serialised CBOR document offline — no NFC hardware required. The CBOR blob is the output of `DocumentEx.ToCbor()`, typically produced by `gmrtd-reader` or the mobile SDK; the verifier replays chip authentication evidence and performs passive authentication, then opens the same HTML report as `gmrtd-reader`.
+
+> **Chip authenticity offline:** replayed evidence only proves the chip was present if the reader that captured it is trusted. Chip Authentication and PACE-CAM evidence can be produced by anyone holding the reader's ephemeral keys, and Active Authentication evidence can be replayed from an earlier read. By default the evidence source is treated as **untrusted**, so *Authentic Chip* only reports Active Authentication bound to a `-challenge` you issued before the read. Use `-trusted-source` (`Verifier.WithTrustedSource()` / mobile `Verifier.WithTrustedSource()`) only for evidence captured by a reader you control.
 
 ### Build / run
 ```bash
@@ -128,11 +135,17 @@ cat document.gmrtd | go run ./cmd/gmrtd-verify -file -
 go run ./cmd/gmrtd-verify -file document.gmrtd -challenge 0102030405060708
 ```
 
+### Evidence from a trusted reader
+```bash
+go run ./cmd/gmrtd-verify -file document.gmrtd -trusted-source
+```
+
 ### Flags
 | Flag | Description |
 |---|---|
 | `-file <path>` | Path to CBOR document file; use `-` for stdin |
-| `-challenge <hex>` | 8-byte AA nonce challenge (16 hex chars); binds against AA evidence to close the relay-attack window |
+| `-challenge <hex>` | 8-byte AA nonce challenge (16 hex chars); binds against AA evidence to close the relay-attack window. Required for chip authenticity unless `-trusted-source` is set |
+| `-trusted-source` | Treat the evidence as captured by a trusted reader, so Chip Authentication, PACE-CAM and unbound Active Authentication evidence count towards chip authenticity |
 | `-debug` | Enable debug logging |
 
 > Uses the same built-in CSCA trust stores as `gmrtd-reader`. See [CSCA Trust Stores](#-csca-trust-stores) for coverage.
@@ -189,6 +202,8 @@ In these cases:
 
 Cloneability does not imply that the physical document can be trivially forged.
 
+By default `ReadDocument` only records chip authentication failures in the session. To get an error instead, call `RequireAuthenticDocument()` on the reader (`reader.Reader` or `mobile.Reader`): `ReadDocument` then fails with `reader.ErrDocumentNotAuthentic` when the data isn't trusted, or when AA, CA or PACE-CAM was attempted and none verified. A document that offers none of them still passes, since its data is trusted. The rejected document is still returned with the error. gomobile bindings drop it, so iOS and Android apps get it from `mobile.Reader.RejectedDocument()` instead, for example to show the trust chain behind the rejection.
+
 # 🛡 CSCA Trust Stores
 For convenience and interoperability testing, gmrtd includes built-in CSCA trust anchors sourced from:
 - [Germany (DE)](https://www.bsi.bund.de/SharedDocs/Downloads/DE/BSI/ElekAusweise/CSCA/GermanMasterList.html)
@@ -197,8 +212,13 @@ For convenience and interoperability testing, gmrtd includes built-in CSCA trust
 
 Together these cover **121 countries**. These defaults can be replaced, extended, or disabled depending on your trust model.
 
+### Showing the trust chain
+`DocumentEx.Summary().PassiveAuth` (mobile: `Document.SummaryJson()`, under `passiveAuth`) describes the Passive Authentication result for display: the status (`VERIFIED`, `FAILED` or `NOT_PERFORMED`), the error, and for EF.SOD and EF.CardSecurity the certificate chain. Each certificate has its role (`DOCUMENT_SIGNER`, `CSCA` or `CSCA_LINK`), subject, issuer, validity, key type, signature algorithm, serial number, SKI/AKI and SHA-256 fingerprint. The same table appears in the HTML report produced by `gmrtd-reader` and `gmrtd-verify`.
+
+When verification fails, the chain holds only the document signer certificate embedded in the document. It is chip-supplied and **unverified**: it shows who claims to have signed the data, not that the data is trusted. `expired` is reported as of now and is informational only: verification is at the time of signing, so expired certificates are normal for older documents.
+
 # 📌 Compatibility
-- Go: 1.26+
+- Go: 1.26.10+
 - Transports: PC/SC, Core NFC, Android NFC, custom APDU transceivers
 - Platforms: Desktop, mobile, embedded
 
@@ -218,6 +238,8 @@ Use `gmrtd-android-16kb.aar` for apps that need Android 16 KB page-size compatib
 This library is intended for **legitimate, consent-based MRTD reading**.
 
 Handle personal data in accordance with applicable laws and regulations.
+
+To report a security vulnerability, see [SECURITY.md](SECURITY.md).
 
 # 📱 Apps Using gmrtd
 Projects using gmrtd to read and verify MRTDs in production:

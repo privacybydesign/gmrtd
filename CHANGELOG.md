@@ -1,5 +1,73 @@
 # Changelog
 
+## [1.7.0](https://github.com/gmrtd/gmrtd/compare/v1.6.0...v1.7.0) (2026-10-25)
+
+
+### Features
+
+* **csca:** update to latest NL CSCA master-list, dated 20/10/2026 (fixes [#551](https://github.com/gmrtd/gmrtd/issues/551)) ([#552](https://github.com/gmrtd/gmrtd/issues/552)) ([a0a90e6](https://github.com/gmrtd/gmrtd/commit/a0a90e6d204d8a10208435f3edb7e3b0b06aca70))
+
+## [1.6.0](https://github.com/gmrtd/gmrtd/compare/v1.5.2...v1.6.0) (2026-10-17)
+
+
+### Features
+
+* **document:** infer Singapore passport DOB century from the NRIC (fixes [#548](https://github.com/gmrtd/gmrtd/issues/548)) ([#547](https://github.com/gmrtd/gmrtd/issues/547)) ([f40880f](https://github.com/gmrtd/gmrtd/commit/f40880fa95b28458f2d66a97804b889e4a4d83a4))
+
+## [1.5.2](https://github.com/gmrtd/gmrtd/compare/v1.5.1...v1.5.2) (2026-10-17)
+
+
+### Bug Fixes
+
+* **pace:** restart PACE from MSE:Set AT when the chip rejects an extended Le ([0d38573](https://github.com/gmrtd/gmrtd/commit/0d38573472d1f9ec570ee43dc0aeb5fb2a3a0f6b))
+* **pace:** restart PACE from MSE:Set AT when the chip rejects an extended Le ([#545](https://github.com/gmrtd/gmrtd/issues/545)) ([f8df8cb](https://github.com/gmrtd/gmrtd/commit/f8df8cb4ac317a932f2966e134430ed5c357bd28))
+
+## [1.5.1](https://github.com/gmrtd/gmrtd/compare/v1.5.0...v1.5.1) (2026-10-17)
+
+
+### Bug Fixes
+
+* **security:** remove the holder's personal data from debug logs and MRZ errors. Debug logs no longer include decrypted chip file contents or parsed DG11/DG12/DG16 details (only file ids, lengths and status words), and MRZ check-digit errors name the field instead of including its value, e.g. `document number check digit mismatch (Exp:7, Act:1)`. Follows on from 1.4.0's removal of passwords and key material from the logs (fixes [#542](https://github.com/gmrtd/gmrtd/issues/542)) ([#543](https://github.com/gmrtd/gmrtd/issues/543)) ([f222e10](https://github.com/gmrtd/gmrtd/commit/f222e1010135f542580c37252d97337c4dfeb6ab))
+
+## [1.5.0](https://github.com/gmrtd/gmrtd/compare/v1.4.0...v1.5.0) (2026-10-17)
+
+
+### Features
+
+* **mobile:** expose the document rejected by `RequireAuthenticDocument`. gomobile drops a result returned alongside an error, so iOS and Android apps now get it from `Reader.RejectedDocument()`, e.g. to show the trust chain behind the rejection. It is `nil` after any other outcome, including a partial read ([#540](https://github.com/gmrtd/gmrtd/issues/540)) ([376d0cb](https://github.com/gmrtd/gmrtd/commit/376d0cbaaf04e5b69d970ca044008f0ad02e597d))
+
+## [1.4.0](https://github.com/gmrtd/gmrtd/compare/v1.3.3...v1.4.0) (2026-10-17)
+
+
+### ⚠ Behaviour change
+
+* **verifier:** when `verifier` checks a serialised document, `VerifiedChipAuthStatus` no longer trusts the capturing reader's chip-authentication results by default. Chip Authentication and PACE-CAM now report `NONE`, because replayed CA/CAM evidence can't prove chip presence, and Active Authentication counts only when its signature is bound to the verifier's own challenge (`WithAAChallenge`, `-challenge` in `gmrtd-verify`). Callers that receive documents from a reader they trust can restore the previous behaviour with `WithTrustedSource()` (`-trusted-source` in `gmrtd-verify`, `Verifier.WithTrustedSource()` in `mobile`).
+
+
+### Features
+
+* **csca:** update to latest DE CSCA master-list, dated 01/10/2026 (fixes [#526](https://github.com/gmrtd/gmrtd/issues/526)) ([#527](https://github.com/gmrtd/gmrtd/issues/527)) ([f6f3287](https://github.com/gmrtd/gmrtd/commit/f6f3287105e6dc1e8557c9e433479f8b092af1d9))
+* **document:** expose a readable passive authentication trust chain in DocumentSummary (fixes [#538](https://github.com/gmrtd/gmrtd/issues/538)) ([#539](https://github.com/gmrtd/gmrtd/issues/539)) ([d9ba2ae](https://github.com/gmrtd/gmrtd/commit/d9ba2aefa31193ae43f72f67d787b6fb6c2c27e6))
+* **reader:** add RequireAuthenticDocument option to fail reads that aren't verifiably authentic (fixes [#525](https://github.com/gmrtd/gmrtd/issues/525)) ([#537](https://github.com/gmrtd/gmrtd/issues/537)) ([f719394](https://github.com/gmrtd/gmrtd/commit/f719394f71ea1549fc874158f5645ba8acc47537))
+* **verifier:** only count offline chip-auth evidence that proves chip presence (fixes [#533](https://github.com/gmrtd/gmrtd/issues/533)) ([#534](https://github.com/gmrtd/gmrtd/issues/534)) ([60f6954](https://github.com/gmrtd/gmrtd/commit/60f6954a0e46a55dc12b311727251a975c1920b1))
+
+
+### Bug Fixes
+
+* **cryptoutils:** encode ECDH shared secrets at field size ([#524](https://github.com/gmrtd/gmrtd/issues/524)) ([fd6e2c5](https://github.com/gmrtd/gmrtd/commit/fd6e2c5990950f09499f634fd9e6eb9cd7790f63))
+* **iso7816:** retry auth commands with short Le when chip rejects extended Le ([#536](https://github.com/gmrtd/gmrtd/issues/536)) ([47c90bf](https://github.com/gmrtd/gmrtd/commit/47c90bf4bdb03d32ea62801de99923aa99f5fe43))
+* **pace:** select the best usable PACEInfo instead of only the top-weighted one (fixes [#529](https://github.com/gmrtd/gmrtd/issues/529)) ([#531](https://github.com/gmrtd/gmrtd/issues/531)) ([77b8b32](https://github.com/gmrtd/gmrtd/commit/77b8b326bb517502ec515f4e358478c4ca321602))
+* **reader:** fall back to BAC when advertised PACE is not supported locally ([#523](https://github.com/gmrtd/gmrtd/issues/523)) ([086bda1](https://github.com/gmrtd/gmrtd/commit/086bda17c1f5f13f4f842d7338681032a5e5f491))
+* remove passwords, password type and key material from debug logs (fixes [#530](https://github.com/gmrtd/gmrtd/issues/530)) ([#532](https://github.com/gmrtd/gmrtd/issues/532)) ([539b558](https://github.com/gmrtd/gmrtd/commit/539b558691235d7773d351308ad236ec1613f177))
+
+## [1.3.3](https://github.com/gmrtd/gmrtd/compare/v1.3.2...v1.3.3) (2026-10-04)
+
+
+### Bug Fixes
+
+* log routine verification messages at debug level ([1473e75](https://github.com/gmrtd/gmrtd/commit/1473e75d85d1a393f564b7a6224719d78206e22e))
+* log routine verification messages at debug level ([#517](https://github.com/gmrtd/gmrtd/issues/517)) ([02b31b0](https://github.com/gmrtd/gmrtd/commit/02b31b0dd7dbd0c35f830dd132ee3a3fd9b2caf6))
+
 ## [1.3.2](https://github.com/gmrtd/gmrtd/compare/v1.3.1...v1.3.2) (2026-09-29)
 
 

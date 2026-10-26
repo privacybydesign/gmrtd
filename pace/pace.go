@@ -26,9 +26,11 @@ package pace
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/cipher"
 	"crypto/elliptic"
 	"encoding/asn1"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -164,6 +166,12 @@ func paceConfigGetByOID(oid asn1.ObjectIdentifier) (*PaceConfig, error) {
 }
 
 // selects the preferred pace-config based on the options advertised in the card-access file
+//
+// ICAO 9303 lets the terminal use any advertised PACEInfo it supports, so entries this reader
+// cannot use are skipped (with a warning) rather than ending selection, and the highest-weighted
+// usable entry wins. If none is usable, the error only wraps ErrPACEUnsupportedLocally when every
+// entry was merely unsupported here; a non-conformant entry (e.g. RFU domain parameters or a
+// missing ParameterId) is reported as-is so callers keep failing closed on it.
 func selectPaceConfig(cardAccess *document.CardAccess) (*PaceConfig, *DomainParams, error) {
 	slog.Debug("selectPaceConfig: evaluating PACE configs")
 
@@ -171,39 +179,69 @@ func selectPaceConfig(cardAccess *document.CardAccess) (*PaceConfig, *DomainPara
 		return nil, nil, fmt.Errorf("[selectPaceConfig] invalid cardAccess: missing CardAccess or SecurityInfos or PaceInfos")
 	}
 
-	var selectedPaceInfo *document.PaceInfo
 	var selectedConfig *PaceConfig
+	var selectedParams *DomainParams
+	var nonConformantErr, unsupportedErr error
 
 	for i := range cardAccess.SecurityInfos.PaceInfos {
 		paceInfo := &cardAccess.SecurityInfos.PaceInfos[i]
-		slog.Debug("selectPaceConfig: evaluating paceInfo", "protocol", paceInfo.Protocol)
+		slog.Debug("selectPaceConfig: evaluating paceInfo", "protocol", paceInfo.Protocol, "parameterId", paceInfo.ParameterId)
 
-		config, err := paceConfigGetByOID(paceInfo.Protocol)
+		config, params, err := usablePaceInfo(paceInfo)
 		if err != nil {
-			slog.Warn("selectPaceConfig: skipping unsupported PACE protocol", "protocol", paceInfo.Protocol, "error", err)
+			slog.Warn("selectPaceConfig: skipping PACE info", "protocol", paceInfo.Protocol, "parameterId", paceInfo.ParameterId, "error", err)
+			if errors.Is(err, ErrPACEUnsupportedLocally) {
+				unsupportedErr = cmp.Or(unsupportedErr, err)
+			} else {
+				nonConformantErr = cmp.Or(nonConformantErr, err)
+			}
 			continue
 		}
 
 		if selectedConfig == nil || config.weighting > selectedConfig.weighting {
-			selectedPaceInfo = paceInfo
 			selectedConfig = config
+			selectedParams = params
 		}
 	}
 
-	if selectedPaceInfo == nil || selectedConfig == nil {
-		return nil, nil, fmt.Errorf("[selectPaceConfig] no supported PACE info found")
+	if selectedConfig != nil {
+		return selectedConfig, selectedParams, nil
 	}
 
-	if selectedPaceInfo.ParameterId == nil {
-		return nil, nil, fmt.Errorf("[selectPaceConfig] missing ParameterId in selected PACE info")
+	if nonConformantErr != nil {
+		return nil, nil, fmt.Errorf("[selectPaceConfig] no usable PACE info found: %w", nonConformantErr)
 	}
 
-	domainParams, err := standardisedDomainParams(int(selectedPaceInfo.ParameterId.Int64()))
+	return nil, nil, fmt.Errorf("[selectPaceConfig] no supported PACE info found: %w", unsupportedErr)
+}
+
+// usablePaceInfo resolves the PACE config and domain parameters for a single advertised
+// PACEInfo. Errors wrap ErrPACEUnsupportedLocally when the entry is valid but this reader cannot
+// perform it; any other error means the entry itself is non-conformant.
+func usablePaceInfo(paceInfo *document.PaceInfo) (*PaceConfig, *DomainParams, error) {
+	config, err := paceConfigGetByOID(paceInfo.Protocol)
 	if err != nil {
-		return nil, nil, fmt.Errorf("[selectPaceConfig] standardisedDomainParams error: %w", err)
+		return nil, nil, fmt.Errorf("%w: %w", ErrPACEUnsupportedLocally, err)
 	}
 
-	return selectedConfig, domainParams, nil
+	// rejected here, rather than in DoPACE, so no PACE command is sent for a mapping we can't complete
+	if config.mapping == IM {
+		return nil, nil, fmt.Errorf("[usablePaceInfo] %w: PACE-IM not implemented", ErrPACEUnsupportedLocally)
+	}
+
+	if paceInfo.ParameterId == nil {
+		return nil, nil, fmt.Errorf("[usablePaceInfo] missing ParameterId")
+	}
+
+	params, err := standardisedDomainParams(int(paceInfo.ParameterId.Int64()))
+	if err != nil {
+		if errors.Is(err, ErrPACEParamNotImplemented) || errors.Is(err, ErrPACEParamUnsupported) {
+			return nil, nil, fmt.Errorf("%w: %w", ErrPACEUnsupportedLocally, err)
+		}
+		return nil, nil, err
+	}
+
+	return config, params, nil
 }
 
 func (paceConfig *PaceConfig) decryptNonce(key, encryptedNonce []byte) ([]byte, error) {
@@ -315,7 +353,6 @@ func (pace *Pace) doApduMseSetAT(paceConfig *PaceConfig, domainParams *DomainPar
 //   - generates shared secret
 //   - do generic mapping (and return G)
 func (pace *Pace) mapNonceGmEcDh(domainParams *DomainParams, s []byte) (mapped_g *cryptoutils.EcPoint, pubMapIC *cryptoutils.EcPoint, termMapPri []byte, termMapPub []byte, err error) {
-	slog.Debug("mapNonceGmEcDh", "s", utils.BytesToHex(s))
 
 	// generate terminal key (private/public)
 	var termKeypair cryptoutils.EcKeypair = pace.keyGeneratorEc(domainParams.ec)
@@ -353,7 +390,6 @@ func (pace *Pace) mapNonceGmEcDh(domainParams *DomainParams, s []byte) (mapped_g
 	// Shared Secret H
 	//
 	var termShared *cryptoutils.EcPoint = cryptoutils.DoEcDh(termKeypair.Pri, pubMapIC, domainParams.ec)
-	slog.Debug("mapNonceGmEcDh", "termShared", termShared.String())
 
 	//
 	// Mapped G
@@ -410,12 +446,9 @@ func (pace *Pace) keyAgreementGmEcDh(domainParams *DomainParams, G *cryptoutils.
 	}
 
 	{
-		var termShared *cryptoutils.EcPoint = cryptoutils.DoEcDh(termKeypair.Pri, chipPub, domainParams.ec)
+		// NB secret is just based on 'x', encoded at field size
+		sharedSecret = cryptoutils.EcDhSharedSecret(termKeypair.Pri, chipPub, domainParams.ec)
 
-		// NB secret is just based on 'x'
-		sharedSecret = termShared.X.Bytes()
-
-		slog.Debug("keyAgreementGmEcDh", "shared-secret", utils.BytesToHex(sharedSecret))
 	}
 
 	return sharedSecret, termKeypair, chipPub, nil
@@ -428,7 +461,6 @@ func (pace *Pace) mutualAuthGmEcDh(paceConfig *PaceConfig, domainParams *DomainP
 	var ksEnc, ksMac []byte
 	ksEnc = cryptoutils.KDF(sharedSecret, cryptoutils.KDF_COUNTER_KSENC, paceConfig.cipher, paceConfig.keyLengthBits)
 	ksMac = cryptoutils.KDF(sharedSecret, cryptoutils.KDF_COUNTER_KSMAC, paceConfig.cipher, paceConfig.keyLengthBits)
-	slog.Debug("mutualAuthGmEcDh", "ksEnc", utils.BytesToHex(ksEnc), "ksMac", utils.BytesToHex(ksMac))
 
 	// generate auth tokens
 	var tIfd, tIc []byte
@@ -575,7 +607,6 @@ func (pace *Pace) doCamEcdh(paceConfig *PaceConfig, domainParams *DomainParams, 
 	if err != nil {
 		return fmt.Errorf("[doCamEcdh] %w", err)
 	}
-	slog.Debug("doCamEcdh", "CA-IC", utils.BytesToHex(caIC))
 
 	// 4.4.3.5.2 Verification by the terminal
 	// The terminal SHALL decrypt AIC to recover CAIC and verify PKMap,IC = KA(CAIC, PKIC, DIC), where PKIC is the static public
@@ -717,7 +748,7 @@ func (pace *Pace) doGenericMappingGmCam(paceConfig *PaceConfig, domainParams *Do
 }
 
 func (pace *Pace) DoPACE() (result *document.PaceResult, camResult *document.PaceCamResult, err error) {
-	slog.Debug("DoPACE", "password-type", pace.password.PasswordType, "password", pace.password.Password)
+	slog.Debug("DoPACE")
 
 	// PACE requires card-access
 	if pace.document.Mf.CardAccess == nil {
@@ -749,45 +780,33 @@ func (pace *Pace) DoPACE() (result *document.PaceResult, camResult *document.Pac
 		return result, nil, fmt.Errorf("[DoPACE] keyForPassword error: %w", err)
 	}
 
-	// init PACE (via 'MSE:Set AT' command)
-	if err = pace.doApduMseSetAT(paceConfig, domainParams); err != nil {
-		return result, nil, fmt.Errorf("[DoPACE] doApduMseSetAT error: %w", err)
+	camEvidence, err := pace.runProtocol(paceConfig, domainParams, kKdf)
+	if errors.Is(err, iso7816.ErrExtendedLeRejected) {
+		// the chip rejected an extended Le and may have aborted PACE in doing so (e.g. French ID
+		// cards answer a resend with 6985), so restart from MSE:Set AT - the session now uses a
+		// short Le for GENERAL AUTHENTICATE
+		slog.Warn("[DoPACE] extended Le rejected, restarting PACE with short Le")
+		camEvidence, err = pace.runProtocol(paceConfig, domainParams, kKdf)
 	}
-
-	// get nonce
-	var s []byte
-	s, err = pace.getNonce(paceConfig, kKdf)
 	if err != nil {
-		return result, nil, fmt.Errorf("[DoPACE] getNonce error: %w", err)
+		return result, nil, err
 	}
-
-	// process based on the mapping type (GM/IM/CAM) and the key type (ECDH/DH)
-	switch paceConfig.mapping {
-	case GM, CAM:
-		var camEvidence *paceCamEvidence
-		camEvidence, err = pace.doGenericMappingGmCam(paceConfig, domainParams, s)
-		if err != nil {
-			return result, nil, fmt.Errorf("[DoPACE] doGenericMappingGmCam error: %w", err)
+	if paceConfig.mapping == CAM && camEvidence != nil {
+		camResult = &document.PaceCamResult{
+			Success: true,
+			Evidence: &document.PaceCamEvidence{
+				PaceOid:     paceConfig.oid,
+				ParameterId: domainParams.id,
+				Nonce:       camEvidence.nonce,
+				TermMapPri:  camEvidence.termMapPri,
+				TermMapPub:  camEvidence.termMapPub,
+				ChipMapPub:  camEvidence.chipMapPub,
+				TermKaPri:   camEvidence.termKaPri,
+				TermKaPub:   camEvidence.termKaPub,
+				ChipKaPub:   camEvidence.chipKaPub,
+				EcadIC:      camEvidence.ecadIC,
+			},
 		}
-		if paceConfig.mapping == CAM && camEvidence != nil {
-			camResult = &document.PaceCamResult{
-				Success: true,
-				Evidence: &document.PaceCamEvidence{
-					PaceOid:     paceConfig.oid,
-					ParameterId: domainParams.id,
-					Nonce:       camEvidence.nonce,
-					TermMapPri:  camEvidence.termMapPri,
-					TermMapPub:  camEvidence.termMapPub,
-					ChipMapPub:  camEvidence.chipMapPub,
-					TermKaPri:   camEvidence.termKaPri,
-					TermKaPub:   camEvidence.termKaPub,
-					ChipKaPub:   camEvidence.chipKaPub,
-					EcadIC:      camEvidence.ecadIC,
-				},
-			}
-		}
-	case IM:
-		return result, nil, fmt.Errorf("[DoPACE] PACE-IM NOT IMPLEMENTED")
 	}
 
 	// update result to indicate success
@@ -796,6 +815,40 @@ func (pace *Pace) DoPACE() (result *document.PaceResult, camResult *document.Pac
 	slog.Debug("DoPACE - Completed", "SM", pace.nfcSession.SM().String())
 
 	return result, camResult, nil
+}
+
+// runProtocol runs the PACE protocol from 'MSE:Set AT' through to mutual authentication.
+// It always starts from MSE:Set AT, so it can be re-run to restart PACE after a failure.
+func (pace *Pace) runProtocol(paceConfig *PaceConfig, domainParams *DomainParams, kKdf []byte) (*paceCamEvidence, error) {
+	// init PACE (via 'MSE:Set AT' command)
+	if err := pace.doApduMseSetAT(paceConfig, domainParams); err != nil {
+		return nil, fmt.Errorf("[DoPACE] doApduMseSetAT error: %w", err)
+	}
+
+	// get nonce
+	s, err := pace.getNonce(paceConfig, kKdf)
+	if err != nil {
+		return nil, fmt.Errorf("[DoPACE] getNonce error: %w", err)
+	}
+
+	camEvidence, err := pace.doMapping(paceConfig, domainParams, s)
+	if err != nil {
+		return nil, fmt.Errorf("[DoPACE] doMapping error: %w", err)
+	}
+
+	return camEvidence, nil
+}
+
+// doMapping performs the nonce mapping and key agreement for the selected mapping type. Only
+// GM/CAM are implemented; selectPaceConfig never selects anything else, but an unexpected
+// mapping must still error rather than let DoPACE report success.
+func (pace *Pace) doMapping(paceConfig *PaceConfig, domainParams *DomainParams, s []byte) (*paceCamEvidence, error) {
+	switch paceConfig.mapping {
+	case GM, CAM:
+		return pace.doGenericMappingGmCam(paceConfig, domainParams, s)
+	default:
+		return nil, fmt.Errorf("[doMapping] unsupported PACE mapping (%d)", paceConfig.mapping)
+	}
 }
 
 // VerifyEvidence verifies the internal cryptographic consistency of PACE-CAM evidence
@@ -932,8 +985,7 @@ func VerifyEvidence(doc *document.Document, evidence *document.PaceCamEvidence) 
 	}
 
 	// re-derive key-agreement shared secret and session keys
-	kaShared := cryptoutils.DoEcDh(evidence.TermKaPri, chipKaPub, domainParams.ec)
-	sharedSecret := kaShared.X.Bytes()
+	sharedSecret := cryptoutils.EcDhSharedSecret(evidence.TermKaPri, chipKaPub, domainParams.ec)
 	ksEnc := cryptoutils.KDF(sharedSecret, cryptoutils.KDF_COUNTER_KSENC, paceConfig.cipher, paceConfig.keyLengthBits)
 
 	// decrypt EcadIC to recover caIC

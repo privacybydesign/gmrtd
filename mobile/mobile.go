@@ -3,6 +3,7 @@ package mobile
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -139,11 +140,12 @@ func NewPasswordCan(can string) (*MrtdPassword, error) {
 
 // Reader is not safe for concurrent use: it is a single-use, single-goroutine
 // object for driving one document read. mu guards the mutable configuration
-// fields (set via SetApduMaxLe/SkipPace/SkipImages/
-// AllowBacFallbackOnPaceError/WithAAChallenge) and serialises ReadDocument, so
-// a Reader that a host app accidentally shares and calls from multiple
-// threads (e.g. gomobile bindings invoked from several Swift/Kotlin dispatch
-// queues) fails safe - calls queue up - rather than racing on these fields
+// fields (set via SetApduMaxLe/SkipPace/SkipImages/AllowBacFallbackOnPaceError/
+// RequireAuthenticDocument/WithAAChallenge), the result read by RejectedDocument,
+// and serialises ReadDocument, so a
+// Reader that a host app accidentally shares and calls from multiple threads
+// (e.g. gomobile bindings invoked from several Swift/Kotlin dispatch queues)
+// fails safe - calls queue up - rather than racing on these fields
 // and corrupting the Go heap. Callers should still construct a new Reader per
 // read rather than relying on this lock.
 type Reader struct {
@@ -155,7 +157,10 @@ type Reader struct {
 	skipPace                    bool
 	skipImages                  bool
 	allowBacFallbackOnPaceError bool
+	requireAuthenticDocument    bool
 	aaChallenge                 []byte
+
+	rejectedDocument *Document
 }
 
 type Document struct {
@@ -203,6 +208,37 @@ func (r *Reader) AllowBacFallbackOnPaceError() {
 	r.allowBacFallbackOnPaceError = true
 }
 
+// RequireAuthenticDocument configures ReadDocument to return an error when the
+// data is not trusted (Passive Authentication or Document.Verify failed), or when
+// chip authentication (AA, CA or PACE-CAM) was attempted but none verifiably
+// succeeded. One method failing is tolerated when another succeeds, and a
+// document offering no chip authentication passes when its data is trusted. A
+// method gmrtd cannot perform counts as failed. The default is off; see
+// reader.Reader.RequireAuthenticDocument.
+//
+// The Document is still returned with the error, but gomobile bindings drop a
+// result returned alongside an error, so iOS/Android callers should use
+// RejectedDocument to get it.
+func (r *Reader) RequireAuthenticDocument() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.requireAuthenticDocument = true
+}
+
+// RejectedDocument returns the Document from the most recent ReadDocument when
+// RequireAuthenticDocument rejected it, so a host app can show why (e.g. the
+// trust chain in SummaryJson). It is nil after any other outcome, including a
+// read that failed part way through: such a Document is incomplete, so isn't
+// exposed here.
+//
+// The Document is NOT verifiably authentic: present it only as a rejected
+// document, never as an accepted one.
+func (r *Reader) RejectedDocument() *Document {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.rejectedDocument
+}
+
 // WithAAChallenge sets a caller-supplied 8-byte RND.IFD challenge for Active
 // Authentication. If not called, a random challenge is generated internally.
 //
@@ -216,6 +252,10 @@ func (r *Reader) AllowBacFallbackOnPaceError() {
 //  2. Supply it here via WithAAChallenge before calling ReadDocument.
 //  3. Pass the same value to Verifier.WithAAChallenge when verifying the
 //     captured evidence; the verifier will hard-error on a nonce mismatch.
+//
+// For a verifier that does not trust this app (e.g. a server), a challenge it
+// issued is what makes AA count: CA/PACE-CAM evidence from this read does not
+// prove chip presence to it (see Verifier).
 func (r *Reader) WithAAChallenge(challenge []byte) (*Reader, error) {
 	if len(challenge) != 8 {
 		return nil, fmt.Errorf("[WithAAChallenge] challenge must be exactly 8 bytes, got %d", len(challenge))
@@ -230,6 +270,8 @@ func (r *Reader) ReadDocument(password *MrtdPassword, atr []byte, ats []byte) (d
 	// Locked for the whole call: see the Reader docstring above.
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	r.rejectedDocument = nil
 
 	// Recover at the public API boundary so an unexpected panic does not
 	// propagate through callers such as gomobile. Do not log here; leave
@@ -260,6 +302,33 @@ func (r *Reader) ReadDocument(password *MrtdPassword, atr []byte, ats []byte) (d
 		return nil, fmt.Errorf("[ReadDocument] getCscaCertPool error: %w", err)
 	}
 
+	gmrtdReader, err := r.newGmrtdReader(nfc, certPool)
+	if err != nil {
+		return nil, fmt.Errorf("[ReadDocument] %w", err)
+	}
+
+	doc.documentEx, doc.apduLog, err = gmrtdReader.ReadDocument(
+		password.password,
+		atr,
+		ats,
+	)
+	if err != nil {
+		r.rejectedDocument = rejectedDocument(doc, err)
+		return doc, err
+	}
+
+	return doc, nil
+}
+
+func rejectedDocument(doc *Document, err error) *Document {
+	if errors.Is(err, reader.ErrDocumentNotAuthentic) {
+		return doc
+	}
+	return nil
+}
+
+// newGmrtdReader builds the underlying reader with this Reader's options applied.
+func (r *Reader) newGmrtdReader(nfc *iso7816.NfcSession, certPool cms.CertPool) (*reader.Reader, error) {
 	gmrtdReader := reader.NewReader(
 		&readerStatusAdapter{status: r.status},
 		nfc,
@@ -278,23 +347,19 @@ func (r *Reader) ReadDocument(password *MrtdPassword, atr []byte, ats []byte) (d
 		gmrtdReader.AllowBacFallbackOnPaceError()
 	}
 
-	if r.aaChallenge != nil {
-		gmrtdReader, err = gmrtdReader.WithAAChallenge(r.aaChallenge)
-		if err != nil {
-			return nil, fmt.Errorf("[ReadDocument] WithAAChallenge error: %w", err)
-		}
+	if r.requireAuthenticDocument {
+		gmrtdReader.RequireAuthenticDocument()
 	}
 
-	doc.documentEx, doc.apduLog, err = gmrtdReader.ReadDocument(
-		password.password,
-		atr,
-		ats,
-	)
+	if r.aaChallenge == nil {
+		return gmrtdReader, nil
+	}
+
+	gmrtdReader, err := gmrtdReader.WithAAChallenge(r.aaChallenge)
 	if err != nil {
-		return doc, err
+		return nil, fmt.Errorf("WithAAChallenge error: %w", err)
 	}
-
-	return doc, nil
+	return gmrtdReader, nil
 }
 
 // CountryName returns the country name for an MRZ alpha-3 country code.
@@ -316,12 +381,19 @@ func OidDesc(oidStr string) string {
 
 // Verifier is not safe for concurrent use: it is a single-use,
 // single-goroutine object for verifying one piece of evidence. mu guards
-// aaChallenge (set via WithAAChallenge) and serialises Verify - see the
-// Reader docstring above for why this matters for gomobile-bound callers.
+// aaChallenge/trustedSource (set via WithAAChallenge/WithTrustedSource) and
+// serialises Verify - see the Reader docstring above for why this matters for
+// gomobile-bound callers.
+//
+// By default the evidence source is treated as untrusted, so the summary's
+// chipAuthenticity only reports AA bound to a WithAAChallenge challenge; see
+// verifier.Verifier for why CA/PACE-CAM evidence cannot prove chip presence
+// offline.
 type Verifier struct {
 	mu sync.Mutex
 
-	aaChallenge []byte
+	aaChallenge   []byte
+	trustedSource bool
 }
 
 func NewVerifier() *Verifier {
@@ -335,6 +407,10 @@ func NewVerifier() *Verifier {
 // the evidence nonce does not match the supplied challenge, or if the AA
 // signature itself fails to verify. See Reader.WithAAChallenge for the
 // corresponding read-side method.
+//
+// Unless WithTrustedSource is set, AA bound to this challenge is the only
+// replayed evidence counted towards chipAuthenticity: CA/PACE-CAM evidence
+// can be produced without the chip by whoever captured it.
 func (v *Verifier) WithAAChallenge(challenge []byte) (*Verifier, error) {
 	if len(challenge) != 8 {
 		return nil, fmt.Errorf("[WithAAChallenge] challenge must be exactly 8 bytes, got %d", len(challenge))
@@ -357,6 +433,10 @@ func (v *Verifier) Verify(data []byte) (doc *Document, err error) {
 
 	gmrtdVerifier := verifier.NewVerifier(certPool)
 
+	if v.trustedSource {
+		gmrtdVerifier = gmrtdVerifier.WithTrustedSource()
+	}
+
 	if v.aaChallenge != nil {
 		if gmrtdVerifier, err = gmrtdVerifier.WithAAChallenge(v.aaChallenge); err != nil {
 			return nil, fmt.Errorf("[Verify] WithAAChallenge error: %w", err)
@@ -369,6 +449,17 @@ func (v *Verifier) Verify(data []byte) (doc *Document, err error) {
 	}
 
 	return &Document{documentEx: docEx}, nil
+}
+
+// WithTrustedSource declares that the evidence was captured by a trusted reader
+// (e.g. the caller's own kiosk, or an app whose integrity it has attested), so
+// replayed CA, PACE-CAM and AA evidence counts towards chipAuthenticity even
+// without an AA challenge. See verifier.Verifier.WithTrustedSource.
+func (v *Verifier) WithTrustedSource() *Verifier {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.trustedSource = true
+	return v
 }
 
 // NewSampleDocument returns a Document populated with static ICAO 9303

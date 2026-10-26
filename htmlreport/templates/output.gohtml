@@ -666,6 +666,12 @@ document.addEventListener('DOMContentLoaded', () => {
       <td>Authentic Chip</td>
       <td>{{.Summary.ChipAuthenticity}}</td>
     </tr>
+    {{- if .Session.Offline}}
+    <tr>
+      <td>Evidence Source</td>
+      <td>{{if .Session.Offline.TrustedSource}}Offline: trusted reader{{else}}Offline: untrusted reader. Only Active Authentication bound to a verifier challenge counts; replayed CA/PACE-CAM evidence does not prove chip presence{{if not .Session.Offline.AAChallengeBound}} (no challenge bound){{end}}{{end}}</td>
+    </tr>
+    {{- end}}
     <tr>
       <td>LDS version</td>
       <td>{{.Summary.LdsVersion}}</td>
@@ -677,6 +683,17 @@ document.addEventListener('DOMContentLoaded', () => {
   </tbody>
 </table>
 </div>
+
+<h2>Passive Authentication</h2>
+{{with .Summary.PassiveAuth}}
+<p>Status: <b>{{.Status}}</b>{{if .Error}} - {{.Error}}{{end}}</p>
+<h3>SOD</h3>
+{{template "trustChain" .Sod}}
+{{if .CardSecurity}}
+<h3>CardSecurity</h3>
+{{template "trustChain" .CardSecurity}}
+{{end}}
+{{end}}
 
 <h2>Identity Attributes</h2>
 {{if .Summary.IdentityAttributes}}
@@ -728,6 +745,10 @@ from the document but has not been authenticated, and may be forged or tampered 
     <tr>
       <td>Date Of Birth</td>
       <td>{{.Summary.IdentityAttributes.DateOfBirth}}</td>
+    </tr>
+    <tr>
+      <td>Date Of Birth Source</td>
+      <td>{{.Summary.IdentityAttributes.DateOfBirthSource}}</td>
     </tr>
     <tr>
       <td>Date Of Birth (MRZ, raw)</td>
