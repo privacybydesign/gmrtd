@@ -1,0 +1,15 @@
+# golangci-lint config for the shared Go checks (Status checks workflow).
+#
+# The code is upstream's (gmrtd/gmrtd), whose CI blocks on go vet and gofmt
+# and ran staticcheck as information only. The linters below are off because
+# they report findings in upstream code (counts at v1.7.0); fixing those here
+# would diverge from upstream and conflict on every sync. Turn them on once
+# upstream has fixed them.
+version: "2"
+
+linters:
+  default: standard
+  disable:
+    - errcheck # 54 findings
+    - ineffassign # 5 findings
+    - staticcheck # 627 findings, 588 of them ST1023
