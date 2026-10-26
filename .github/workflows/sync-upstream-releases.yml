@@ -25,13 +25,15 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout fork
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
           fetch-tags: true
           # PAT with Contents + Workflows write: GITHUB_TOKEN can never push
           # upstream commits that touch .github/workflows/.
           token: ${{ secrets.SYNC_TOKEN }}
+          # The next step pushes the tags with these credentials.
+          persist-credentials: true
 
       - name: Sync tags from upstream
         run: |
