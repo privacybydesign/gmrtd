@@ -77,7 +77,7 @@ jobs:
             # Unique keys of your project and organization, sourced from repo variables
             # (Settings > Secrets and variables > Actions > Variables); values from SonarCloud > Information (bottom-left menu)
             # mandatory
-            -Dsonar.projectKey=${{ vars.SONAR_PROJECT_KEY }}
+            -Dsonar.projectKey=${{ vars.SONAR_ORGANIZATION }}_${{ github.event.repository.name }}
             -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }}
             -Dsonar.sources=.
             -Dsonar.exclusions=**/*_test.go,**/vendor/**,**/*.md,**/*.ml,**/*.yml
