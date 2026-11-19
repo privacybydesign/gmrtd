@@ -1,5 +1,45 @@
 # Changelog
 
+## [1.9.1](https://github.com/gmrtd/gmrtd/compare/v1.9.0...v1.9.1) (2026-11-16)
+
+
+### Bug Fixes
+
+* **chipauth:** don't panic when a CA public key omits its KeyId ([1aa8f33](https://github.com/gmrtd/gmrtd/commit/1aa8f3392cd9f5945916bd36216f7bf57fb969cc))
+* **chipauth:** don't panic when a CA public key omits its KeyId ([#580](https://github.com/gmrtd/gmrtd/issues/580)) ([04d8b27](https://github.com/gmrtd/gmrtd/commit/04d8b27545bfa9aabbae4b69285be5c5a9b504c9))
+
+## [1.9.0](https://github.com/gmrtd/gmrtd/compare/v1.8.0...v1.9.0) (2026-11-11)
+
+
+### Features
+
+* **csca:** update to latest NL CSCA master-list, dated 09/11/2026 (fixes [#576](https://github.com/gmrtd/gmrtd/issues/576)) ([c1c2a91](https://github.com/gmrtd/gmrtd/commit/c1c2a914cdbe0bf40f3b1eb216bc987c2596a1d4))
+* **csca:** update to latest NL CSCA master-list, dated 09/11/2026 (fixes [#576](https://github.com/gmrtd/gmrtd/issues/576)) ([#577](https://github.com/gmrtd/gmrtd/issues/577)) ([8e67afb](https://github.com/gmrtd/gmrtd/commit/8e67afbf0ca790e1fcccedf7a267164fdbf18587))
+
+## [1.8.0](https://github.com/gmrtd/gmrtd/compare/v1.7.2...v1.8.0) (2026-11-01)
+
+
+### Features
+
+* **cms:** verify RFC 6211 CMSAlgorithmProtection signed attribute ([47bb028](https://github.com/gmrtd/gmrtd/commit/47bb0289f38c90761242dca98e6fbc4ed8ed8551)), closes [#15](https://github.com/gmrtd/gmrtd/issues/15)
+* **cms:** verify RFC 6211 CMSAlgorithmProtection signed attribute ([#568](https://github.com/gmrtd/gmrtd/issues/568)) ([29a7f79](https://github.com/gmrtd/gmrtd/commit/29a7f79d92ae5faf877a6a7c2cf8b7c53a7a0c52))
+
+## [1.7.2](https://github.com/gmrtd/gmrtd/compare/v1.7.1...v1.7.2) (2026-11-01)
+
+
+### Bug Fixes
+
+* **mrz:** only allow an unset ('&lt;') check digit for TD3 optional data ([#564](https://github.com/gmrtd/gmrtd/issues/564)) ([19d36e4](https://github.com/gmrtd/gmrtd/commit/19d36e4489c282649cfc8d776cb7a1276c849970))
+* **mrz:** treat spaces as '&lt;' fillers in MrzDecode, as ConvertMrzToMrzi does ([#566](https://github.com/gmrtd/gmrtd/issues/566)) ([c303802](https://github.com/gmrtd/gmrtd/commit/c30380251844292a378f15335509be4a99f5b0be))
+* **mrz:** treat spaces as '&lt;' fillers when deriving the MRZi from a scanned MRZ ([#562](https://github.com/gmrtd/gmrtd/issues/562)) ([558e35e](https://github.com/gmrtd/gmrtd/commit/558e35e551b3ed4ec94bfa46cea0a9aea70545bf))
+
+## [1.7.1](https://github.com/gmrtd/gmrtd/compare/v1.7.0...v1.7.1) (2026-10-26)
+
+
+### Bug Fixes
+
+* bump go directive to 1.26.10 to pick up standard-library security fixes (fixes [#554](https://github.com/gmrtd/gmrtd/issues/554)) ([#555](https://github.com/gmrtd/gmrtd/issues/555)) ([59b3f1e](https://github.com/gmrtd/gmrtd/commit/59b3f1eeee1fcc44768cdaa040e3867df2ec2e60))
+
 ## [1.7.0](https://github.com/gmrtd/gmrtd/compare/v1.6.0...v1.7.0) (2026-10-25)
 
 
