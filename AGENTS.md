@@ -48,14 +48,18 @@ Go version: 1.26.10+ (see `go.mod`, `go-version-file: go.mod` in CI).
 ## Fuzzing
 
 `.github/workflows/fuzz.yml` runs Go's native fuzzer (`go test -fuzz=...`)
-nightly against `FuzzXxx` targets spread across `tlv`, `mrz`, `cms`,
-`iso7816`, and `document` (one `<pkg>/fuzz_test.go` per package, separate
-from the hand-written `_test.go` files). It's informational-only (doesn't
+nightly against `FuzzXxx` targets in every package that consumes untrusted
+bytes (`tlv`, `mrz`, `cms`, `iso7816`, `cryptoutils`, `document` and its
+`iso19794`/`iso39794` subpackages, `bac`, `pace`, `chipauth`, `activeauth`,
+`verifier`), one `<pkg>/fuzz_test.go` per package, separate from the
+hand-written `_test.go` files. It's informational-only (doesn't
 gate PRs) since each target needs real wall-clock time.
 
 - When adding a new parser that takes attacker-controlled `[]byte`/`string`
   (a new DG, a new file type, anything reachable from chip/file data), add a
-  matching `FuzzXxx` harness and a matrix entry in `fuzz.yml`. Seed it with
+  matching `FuzzXxx` harness and a matrix entry in `fuzz.yml` (the root
+  package's `TestFuzzWorkflowMatrixCoversAllFuzzTargets` fails until the
+  two match). Seed it with
   `f.Add(...)` using real sample bytes already in that package's tests where
   possible, not synthetic data.
 - Don't fuzz a function that's *documented* to panic on bad input as a

@@ -138,11 +138,41 @@ func TestCalcCheckdigitBadCharErr(t *testing.T) {
 	}
 }
 
-func TestVerifyCheckdigitEmptyWithoutCheckDigitOk(t *testing.T) {
-	// special handling for case where the string is empty and the check-digit is not set
-	err := verifyCheckdigit("test", "<<<<<<<<", "<")
-	if err != nil {
-		t.Errorf("Unexpected error: %s", err)
+func TestVerifyOptionalDataCheckdigit(t *testing.T) {
+	testCases := []struct {
+		data       string
+		checkDigit string
+		expErr     bool
+	}{
+		{data: "<<<<<<<<<<<<<<", checkDigit: "<"}, // all fillers, check digit unset
+		{data: "<<<<<<<<<<<<<<", checkDigit: "0"},
+		{data: "ZE184226B<<<<<", checkDigit: "1"},
+		{data: "ZE184226B<<<<<", checkDigit: "<", expErr: true},
+		{data: "ZE184226B<<<<<", checkDigit: "2", expErr: true},
+	}
+	for i, tc := range testCases {
+		if err := verifyOptionalDataCheckdigit(tc.data, tc.checkDigit); (err != nil) != tc.expErr {
+			t.Errorf("[%d] err = %v, expErr %v", i, err, tc.expErr)
+		}
+	}
+}
+
+// Only TD3 optional data may leave its check digit unset: dates and document numbers of all
+// fillers still have a computed check digit ('0'). Found by FuzzConvertMrzToMrzi, where an
+// all-filler date of expiry with a '<' check digit was accepted and put '<' into the MRZi.
+func TestVerifyCheckdigitFillersRequireCheckDigit(t *testing.T) {
+	if err := verifyCheckdigit(fieldDateOfExpiry, "<<<<<<", "<"); err == nil {
+		t.Errorf("expected error for '<' check digit")
+	}
+	if err := verifyCheckdigit(fieldDateOfBirth, "<<<<<<", "0"); err != nil {
+		t.Errorf("unexpected error: %s", err)
+	}
+
+	// TD3 with an all-filler date of expiry and a '<' check digit (ConvertMrzToMrzi ignores the
+	// composite check digit, so this is rejected only for the date of expiry)
+	td3 := "P<UTOERIKSSON<<ANNA<MARIA<<<<<<<<<<<<<<<<<<<L898902C36UTO7408122F<<<<<<<ZE184226B<<<<<10"
+	if _, err := ConvertMrzToMrzi(td3); err == nil {
+		t.Errorf("ConvertMrzToMrzi: expected error")
 	}
 }
 
@@ -245,11 +275,19 @@ func TestMrzDecodeMrziEncode(t *testing.T) {
 			inp_mrz:  "P<UTOERIKSSON<<ANNA<MARIA<<<<<<<<<<<<<<<<<<<L898902C36UTO7408122F1204159ZE184226B<<<<<10",
 			exp_mrzi: "L898902C3674081221204159",
 		},
+		{
+			// TD1 extended document-number with spaces for fillers (as OCR may read them): found by
+			// FuzzConvertMrzToMrzi, where the space was skipped when locating the separator, so
+			// MrzDecode read a longer, wrong document number than ConvertMrzToMrzi
+			inp_mrz:  "I UTOD23145890 7349           3407127M9507122UTO           2STEVENSON  PETER JOHN         ",
+			exp_mrzi: "D23145890734934071279507122",
+		},
 	}
 	for _, tc := range testCases {
 		mrz, err := MrzDecode(tc.inp_mrz)
 		if err != nil {
 			t.Errorf("Unexpected error: %s", err)
+			continue
 		}
 
 		actMrzi, err := mrz.EncodeMrzi()
@@ -473,6 +511,18 @@ func TestConvertMrzToMrzi(t *testing.T) {
 			desc:    "TD3",
 			inp_mrz: "P<UTOERIKSSON<<ANNA<MARIA<<<<<<<<<<<<<<<<<<<L898902C36UTO7408122F1204159ZE184226B<<<<<10",
 			exp:     "L898902C3674081221204159",
+		},
+		{
+			// found by FuzzConvertMrzToMrzi: a space for a '<' filler passed the check digit but was
+			// kept in the MRZi, giving the wrong BAC/PACE key
+			desc:    "TD2 with spaces for fillers in document number",
+			inp_mrz: "I UTOERIKSSON  ANNA MARIA           D2314589 7UTO7408122F1204159       6",
+			exp:     "D2314589<774081221204159",
+		},
+		{
+			desc:    "TD1 extended document-number with spaces for fillers",
+			inp_mrz: "I UTOD23145890 7349           3407127M9507122UTO           2STEVENSON  PETER JOHN         ",
+			exp:     "D23145890734934071279507122",
 		},
 	}
 	for _, tc := range testCases {

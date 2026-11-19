@@ -86,6 +86,10 @@ func DecodeValue(value string) string {
 }
 
 func MrzDecode(mrz string) (*MRZ, error) {
+	// as ConvertMrzToMrzi: OCR can read the '<' filler as a space, which would otherwise be missed
+	// when locating the separator of an extended (TD1/TD2) document number
+	mrz = strings.ReplaceAll(mrz, " ", "<")
+
 	switch len(mrz) {
 	case MRZLengthTD1:
 		return decodeTD1(mrz)
@@ -140,11 +144,6 @@ const (
 // verifyCheckdigit's errors name the field but never include its value: MRZ data is the
 // holder's personal data, and errors end up in app logs and analytics.
 func verifyCheckdigit(field, data, checkDigit string) error {
-	// check for empty field with unset checkdigit
-	if (checkDigit == "<") && (len(strings.Trim(data, "<")) == 0) {
-		return nil
-	}
-
 	var err error
 	var expCD string
 
@@ -338,7 +337,7 @@ func decodeTD3(mrz string) (*MRZ, error) {
 	if err := verifyMrziCheckdigits(documentNumber, documentNumberCD, dateOfBirth, dateOfBirthCD, dateOfExpiry, dateOfExpiryCD); err != nil {
 		return nil, err
 	}
-	if err := verifyCheckdigit(fieldOptionalData, optionalData, optionalDataCD); err != nil {
+	if err := verifyOptionalDataCheckdigit(optionalData, optionalDataCD); err != nil {
 		return nil, err
 	}
 
@@ -348,6 +347,16 @@ func decodeTD3(mrz string) (*MRZ, error) {
 	}
 
 	return out, nil
+}
+
+// verifyOptionalDataCheckdigit verifies the TD3 optional data (personal number) check digit,
+// which ICAO 9303 allows to be '<' when the field is all fillers. No other field may omit its
+// check digit: a document number or date of all fillers still has a computed check digit ('0').
+func verifyOptionalDataCheckdigit(optionalData, checkDigit string) error {
+	if checkDigit == "<" && strings.Trim(optionalData, "<") == "" {
+		return nil
+	}
+	return verifyCheckdigit(fieldOptionalData, optionalData, checkDigit)
 }
 
 func buildMrzi(docNum, docNumCD, dob, dobCD, expiry, expiryCD string) (string, error) {
@@ -411,6 +420,10 @@ func extractMrziTD3(mrz string) (string, error) {
 // of birth, date of expiry). The composite check digit and all other fields are ignored,
 // so OCR noise outside those three fields does not cause failure.
 func ConvertMrzToMrzi(mrzStr string) (string, error) {
+	// OCR can read the '<' filler as a space. Check digits already treat the two alike, but the
+	// chip derives its BAC/PACE key from '<', so a space left in the MRZi gives the wrong key.
+	mrzStr = strings.ReplaceAll(mrzStr, " ", "<")
+
 	switch len(mrzStr) {
 	case MRZLengthTD1:
 		return extractMrziTD1(mrzStr)
